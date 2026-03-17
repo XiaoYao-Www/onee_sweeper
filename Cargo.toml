@@ -1,6 +1,37 @@
 [package]
 name = "onee_sweeper"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+tray-icon = "0.21.3"
+winit = "0.30.13"
+image = "0.25.10"
+
+# 日誌
+log = { version = "0.4", features = ["release_max_level_warn"] }
+simplelog = "0.12"
+
+# toml
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "0.9.8"
+
+# 路徑
+globset = "0.4.18"
+
+# 二進制讀寫
+rkyv = { version = "0.8", features = ["alloc", "bytecheck"] }
+bytemuck = { version = "1.14", features = ["derive"] }
+
+# 垃圾桶
+trash = "5.2"
+
+# 文字編輯器
+edit = "0.1.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+strip = true

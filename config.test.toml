@@ -1,0 +1,22 @@
+# 測試配置文件 - 用於驗證程序功能
+
+[app_setting]
+small_scan_interval = 15
+complete_scan_interval = 60
+test_mode = true  # 重要：測試模式，不會實際刪除
+log_max_size_mb = 10
+
+# 測試任務：清理下載資料夾中的臨時文件
+[[tasks]]
+folder_path = "C:/Users/YourName/Downloads"  # 請修改為實際路徑
+really_delete = false
+
+target = [
+    "*.tmp",
+    "*.temp",
+]
+
+[tasks.threshold]
+day = 7
+hour = 0
+minute = 0
