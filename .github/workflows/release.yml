@@ -1,0 +1,158 @@
+name: Windows Build & Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ----------------------------
+  # 1. 檢查版本與標籤 (Check Version)
+  # ----------------------------
+  check_version:
+    name: Check Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+      version_changed: ${{ steps.check_tag.outputs.changed }}
+    steps:
+      - name: 檢出程式碼 (Checkout)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 讀取 Cargo.toml 版本 (Get Version)
+        id: get_version
+        shell: bash
+        run: |
+          VERSION=$(grep -E '^version\s*=' Cargo.toml | head -1 | sed 's/version *= *"\(.*\)"/\1/')
+          echo "Detected version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: 檢查標籤是否存在 (Check Tag)
+        id: check_tag
+        shell: bash
+        run: |
+          VERSION="${{ steps.get_version.outputs.version }}"
+          TAG_NAME="v${VERSION}_Auto"
+          
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "Tag $TAG_NAME already exists. Skipping build."
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            echo "Tag $TAG_NAME not found. Proceeding with release."
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+  # ----------------------------
+  # 2. 建置與打包 (Build & Package)
+  # ----------------------------
+  build:
+    name: Build Windows
+    needs: check_version
+    if: needs.check_version.outputs.version_changed == 'true'
+    runs-on: windows-latest
+
+    steps:
+      - name: 檢出程式碼 (Checkout)
+        uses: actions/checkout@v4
+
+      - name: 安裝 Rust 工具鏈 (Install Rust)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: 設定 Cargo 快取 (Cache)
+        uses: swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-gnu
+
+      - name: 編譯專案 (Build)
+        shell: bash
+        run: cargo build --release --target x86_64-pc-windows-gnu
+
+      - name: 打包壓縮 (Package)
+        shell: bash
+        run: |
+          VERSION="${{ needs.check_version.outputs.version }}"
+          BIN_NAME="onee_sweeper"
+          DIST_DIR="dist"
+          mkdir -p "$DIST_DIR"
+
+          # 組合檔名
+          SOURCE_FILE="target/x86_64-pc-windows-gnu/release/${BIN_NAME}.exe"
+          ZIP_NAME="${BIN_NAME}-${VERSION}-x86_64-pc-windows-gnu.zip"
+          
+          # 複製執行檔並進入資料夾壓縮
+          cp "$SOURCE_FILE" "$DIST_DIR/${BIN_NAME}.exe"
+          cd $DIST_DIR
+          
+          # 使用 Windows 內建的 7z 進行壓縮
+          7z a "$ZIP_NAME" "${BIN_NAME}.exe"
+
+      - name: 上傳構建產物 (Upload Artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-windows
+          path: dist/*.zip
+          retention-days: 1
+
+  # ----------------------------
+  # 3. 發布 Release (Create Release)
+  # ----------------------------
+  release:
+    name: Create Release
+    needs: [check_version, build]
+    if: needs.check_version.outputs.version_changed == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 檢出程式碼 (Checkout)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 下載構建產物 (Download Artifacts)
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: artifact-*
+          merge-multiple: true
+
+      - name: 產生變更日誌 (Generate Changelog)
+        id: changelog
+        shell: bash
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          
+          if [ -z "$LAST_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" | tr -d '\r')
+          else
+            CHANGELOG=$(git log "$LAST_TAG"..HEAD --pretty=format:"- %s (%h)" | tr -d '\r')
+          fi
+          
+          if [ -z "$CHANGELOG" ]; then
+            CHANGELOG="無變更內容"
+          fi
+          
+          {
+            echo "body<<EOF"
+            echo "$CHANGELOG"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: 建立 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.check_version.outputs.version }}_Auto
+          name: "v${{ needs.check_version.outputs.version }}"
+          body: |
+            ### 📦 變更內容
+            ${{ steps.changelog.outputs.body }}
+          files: artifacts/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
