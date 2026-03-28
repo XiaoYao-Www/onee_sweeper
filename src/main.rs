@@ -10,7 +10,12 @@ use winit::{
     event::WindowEvent,
     event_loop::{ ActiveEventLoop, ControlFlow, EventLoop },
 };
-use tray_icon::{ Icon, TrayIcon, TrayIconBuilder, menu::{ Menu, MenuItem, MenuEvent } };
+use tray_icon::{
+    Icon,
+    TrayIcon,
+    TrayIconBuilder,
+    menu::{ Menu, MenuItem, MenuEvent, PredefinedMenuItem },
+};
 use image::{ ImageBuffer, Rgba };
 use std::fs::{ self, File };
 use std::path::{ Path, PathBuf };
@@ -18,6 +23,7 @@ use std::io::{ self };
 use std::env;
 use std::time::{ Instant, Duration, SystemTime, UNIX_EPOCH };
 use globset::{ Glob, GlobSetBuilder };
+use mslnk::ShellLink;
 
 use type_define::Config;
 
@@ -65,7 +71,7 @@ fn cleanup_old_logs(max_size_mb: u64) -> io::Result<()> {
                     let _ = fs::remove_file(&backup_path);
                 }
                 let _ = fs::rename(&log_path, &backup_path);
-                
+
                 // 創建新日誌文件
                 File::create(&log_path)?;
                 info!("已清理日誌文件 (大小: {} MB)，舊日誌已備份", size_mb);
@@ -97,9 +103,7 @@ fn get_file_path(file_path: &str) -> io::Result<PathBuf> {
 /// - raba_bytes 圖標的二進制字節串
 fn load_icon(rgba_bytes: &[u8]) -> Result<Icon, Box<dyn std::error::Error>> {
     // 從記憶體載入圖片數據
-    let image: ImageBuffer<Rgba<u8>, Vec<u8>> = image
-        ::load_from_memory(rgba_bytes)?
-        .into_rgba8();
+    let image: ImageBuffer<Rgba<u8>, Vec<u8>> = image::load_from_memory(rgba_bytes)?.into_rgba8();
 
     let (width, height): (u32, u32) = image.dimensions();
     let rgba: Vec<u8> = image.into_raw();
@@ -112,7 +116,9 @@ fn load_icon(rgba_bytes: &[u8]) -> Result<Icon, Box<dyn std::error::Error>> {
 /// 使用系統預設編輯器打開日誌文件
 fn open_log_file() -> Result<(), Box<dyn std::error::Error>> {
     let exe_path = env::current_exe()?;
-    let exe_dir = exe_path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "無法取得執行檔目錄"))?;
+    let exe_dir = exe_path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "無法取得執行檔目錄"))?;
     let log_path = exe_dir.join(LOG_FILE_NAME);
 
     if log_path.exists() {
@@ -152,12 +158,62 @@ fn read_config() -> Option<Config> {
     config::read_config(&path)
 }
 
+/// ### 創建開機啟動
+///
+/// 創建開機啟動連結。
+fn create_startup_link() -> io::Result<()> {
+    let exe_path: PathBuf = env::current_exe()?; // 獲取執行檔的路徑
+
+    // 獲取開機啟動目錄
+    let mut startup_path: PathBuf = PathBuf::from(
+        env::var("APPDATA").map_err(|e: env::VarError| io::Error::new(io::ErrorKind::NotFound, e))?
+    );
+    startup_path.push(r"Microsoft\Windows\Start Menu\Programs\Startup");
+
+    let link_path: PathBuf = startup_path.join("Onee Sweeper.lnk"); // 創建啟動連結名稱
+
+    let sl: ShellLink = ShellLink::new(&exe_path).map_err(|e: mslnk::MSLinkError|
+        io::Error::new(io::ErrorKind::NotFound, e)
+    )?;
+    sl
+        .create_lnk(link_path)
+        .map_err(|e: mslnk::MSLinkError| io::Error::new(io::ErrorKind::NotFound, e))?;
+
+    Ok(())
+}
+
+/// ### 移除開機啟動
+///
+/// 刪除位於啟動資料夾中的快捷方式。
+/// 
+/// 回傳是否有移除連結
+fn remove_startup_link() -> io::Result<bool> {
+    // 1. 獲取開機啟動目錄
+    let mut startup_path: PathBuf = PathBuf::from(
+        env::var("APPDATA").map_err(|e: env::VarError| io::Error::new(io::ErrorKind::NotFound, e))?
+    );
+    startup_path.push(r"Microsoft\Windows\Start Menu\Programs\Startup");
+
+    // 2. 指定要刪除的連結名稱 (需與創建時一致)
+    let link_path: PathBuf = startup_path.join("Onee Sweeper.lnk");
+
+    // 3. 檢查檔案是否存在並執行刪除
+    if link_path.exists() {
+        fs::remove_file(link_path)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 /// ### 應用程序結構
 struct App {
     tray_icon: Option<TrayIcon>, // 圖標
     open_config: MenuItem, // 打開配置
     open_log: MenuItem, // 打開日誌
     refresh_config: MenuItem, // 刷新配置
+    creat_startup_link: MenuItem, // 創建開機啟動連結
+    remove_startup_link: MenuItem, // 移除開機啟動連結
     quit_item: MenuItem, // 退出選項
 
     config: Option<Config>, // 配置文件
@@ -177,10 +233,12 @@ impl App {
             } else {
                 load_icon(include_bytes!("../assets/icon_stop.ico"))
             };
-            
+
             match icon_result {
-                Ok(icon) => { let _ = tray.set_icon(Some(icon)); }
-                Err(e) => error!("載入圖標失敗: {}", e)
+                Ok(icon) => {
+                    let _ = tray.set_icon(Some(icon));
+                }
+                Err(e) => error!("載入圖標失敗: {}", e),
             }
         }
     }
@@ -188,7 +246,7 @@ impl App {
     /// ### 重新載入配置
     fn reload_config(&mut self) {
         let new_config = read_config();
-        
+
         // 只有成功載入新配置才更新
         match new_config {
             Some(cfg) => {
@@ -204,7 +262,7 @@ impl App {
                 // 不更新 self.config，保持原有配置繼續運行
             }
         }
-        
+
         self.change_icon();
     }
 
@@ -256,8 +314,8 @@ impl App {
                 }
 
                 // 計算閾值時間（秒）
-                let threshold_secs: u64 =
-                    (task.threshold.day as u64).saturating_mul(86400)
+                let threshold_secs: u64 = (task.threshold.day as u64)
+                    .saturating_mul(86400)
                     .saturating_add((task.threshold.hour as u64).saturating_mul(3600))
                     .saturating_add((task.threshold.minute as u64).saturating_mul(60));
 
@@ -290,7 +348,9 @@ impl App {
                 };
 
                 match result {
-                    Ok(_) => task_success += 1,
+                    Ok(_) => {
+                        task_success += 1;
+                    }
                     Err(e) => {
                         error!("  掃描失敗: {}", e);
                         task_errors += 1;
@@ -487,7 +547,7 @@ impl App {
                 } else {
                     warn!("  資料夾時間計算溢出，跳過: {}", rela_path.display());
                 }
-                
+
                 continue; // 跳過檔案處理邏輯
             }
 
@@ -549,7 +609,7 @@ impl App {
                 .map_err(|e: std::path::StripPrefixError|
                     io::Error::new(io::ErrorKind::Other, e.to_string())
                 )?;
-            
+
             // 只有非根目錄才更新
             if rela_path.as_os_str() != "" {
                 if let Some(current_recorded) = db.get(root, rela_path) {
@@ -594,7 +654,7 @@ impl App {
         };
 
         let mut to_delete: Vec<PathBuf> = Vec::new(); // 絕對路徑
-        
+
         // 創建匹配器
         let set: Option<globset::GlobSet> = if let Some(some_target) = target {
             let mut builder: GlobSetBuilder = GlobSetBuilder::new();
@@ -647,17 +707,18 @@ impl App {
             if let Some(match_set) = &set {
                 // 檢查路徑是否匹配
                 let is_match = match_set.is_match(&rela_path);
-                
+
                 // 檢查是否在已匹配的父資料夾內
-                let in_target_folder = rela_path.ancestors()
+                let in_target_folder = rela_path
+                    .ancestors()
                     .skip(1) // 跳過自己
                     .any(|ancestor| match_set.is_match(ancestor));
-                
+
                 if !is_match && !in_target_folder {
                     continue; // 不匹配，跳過
                 }
             }
-            
+
             // 讀取閥值，讀不到的話，跳過(不會刪除)
             if let Some(recorded_time) = db.get(folder_path, &rela_path) {
                 // 使用 checked_sub 防止溢出
@@ -785,7 +846,12 @@ impl App {
     /// - paths 路徑列表(絕對路徑)
     /// - task_folder 任務資料夾(絕對路徑)
     /// - db 資料庫
-    fn optimize_delete_paths(&self, paths: &[PathBuf], task_folder: &Path, db: &mut scanner::ScanDatabase) -> Vec<PathBuf> {
+    fn optimize_delete_paths(
+        &self,
+        paths: &[PathBuf],
+        task_folder: &Path,
+        db: &mut scanner::ScanDatabase
+    ) -> Vec<PathBuf> {
         if paths.is_empty() {
             return Vec::new();
         }
@@ -812,7 +878,7 @@ impl App {
             }
 
             let mut is_child = false;
-            
+
             // 檢查是否是已有路徑的子路徑
             for parent in &optimized {
                 if path.starts_with(parent) {
@@ -825,12 +891,12 @@ impl App {
                     break;
                 }
             }
-            
+
             if !is_child {
                 optimized.push((*path).clone());
             }
         }
-        
+
         if removed_count > 0 {
             info!("  優化刪除: 合併了 {} 個子路徑", removed_count);
         }
@@ -858,7 +924,7 @@ impl App {
     ) {
         let mut success_count = 0;
         let mut fail_count = 0;
-        
+
         for path in paths {
             // 多重安全檢查
             // 1. 不刪除任務根目錄
@@ -867,14 +933,14 @@ impl App {
                 fail_count += 1;
                 continue;
             }
-            
+
             // 2. 確保路徑在任務資料夾內
             if !path.starts_with(task_folder) {
                 error!("  ✗ 警告：路徑不在任務資料夾內，跳過: {}", path.display());
                 fail_count += 1;
                 continue;
             }
-            
+
             // 3. 檢查路徑是否存在
             if !path.exists() {
                 warn!("  ⚠ 路徑已不存在，跳過: {}", path.display());
@@ -921,7 +987,7 @@ impl App {
                 }
             }
         }
-        
+
         if success_count > 0 || fail_count > 0 {
             info!("  刪除統計: 成功 {} 個，失敗 {} 個", success_count, fail_count);
         }
@@ -935,19 +1001,31 @@ impl ApplicationHandler for App {
         if self.tray_icon.is_none() {
             // 創建選單
             let tray_menu: Menu = Menu::new();
-            if let Err(e) = tray_menu
-                .append_items(
-                    &[&self.open_config, &self.open_log, &self.refresh_config, &self.quit_item]
-                ) {
+            if
+                let Err(e) = tray_menu.append_items(
+                    &[
+                        &self.open_config,
+                        &self.open_log,
+                        &self.refresh_config,
+                        &PredefinedMenuItem::separator(),
+                        &self.creat_startup_link,
+                        &self.remove_startup_link,
+                        &PredefinedMenuItem::separator(),
+                        &self.quit_item,
+                    ]
+                )
+            {
                 error!("創建選單失敗: {}", e);
                 return;
             }
 
             // 創建小圖示
-            match TrayIconBuilder::new()
-                .with_menu(Box::new(tray_menu))
-                .with_tooltip("ONEE SWEEPER")
-                .build() {
+            match
+                TrayIconBuilder::new()
+                    .with_menu(Box::new(tray_menu))
+                    .with_tooltip("ONEE SWEEPER")
+                    .build()
+            {
                 Ok(tray) => {
                     self.tray_icon = Some(tray);
                     self.change_icon();
@@ -1022,6 +1100,7 @@ impl ApplicationHandler for App {
         // 處理選單事件
         if let Ok(event) = MenuEvent::receiver().try_recv() {
             debug!("選單點擊事件: {:?}", event);
+
             if event.id == self.quit_item.id() {
                 info!("用戶請求退出程序");
                 event_loop.exit();
@@ -1038,6 +1117,17 @@ impl ApplicationHandler for App {
             } else if event.id == self.refresh_config.id() {
                 info!("刷新配置");
                 self.reload_config();
+            } else if event.id == self.creat_startup_link.id() {
+                match create_startup_link() {
+                    Ok(()) => info!("創建啟動鏈接成功"),
+                    Err(e) => error!("創建啟動鏈接失敗{}", e)
+                }
+            } else if event.id == self.remove_startup_link.id() {
+                match remove_startup_link() {
+                    Ok(true) => info!("已移除啟動連結"),
+                    Ok(false) => info!("未找到啟動連結"),
+                    Err(e) => error!("移除啟動鏈接失敗{}", e)
+                }
             }
         }
     }
@@ -1078,6 +1168,8 @@ fn main() -> io::Result<()> {
         open_config: MenuItem::new("開啟配置", true, None),
         open_log: MenuItem::new("查看日誌", true, None),
         refresh_config: MenuItem::new("刷新配置", true, None),
+        creat_startup_link: MenuItem::new("創建開機啟動", true, None),
+        remove_startup_link: MenuItem::new("移除開機啟動", true, None),
         quit_item: MenuItem::new("退出", true, None),
         last_complete_scan: now_instant,
         last_small_scan: now_instant,

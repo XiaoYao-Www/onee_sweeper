@@ -8,6 +8,9 @@ tray-icon = "0.21.3"
 winit = "0.30.13"
 image = "0.25.10"
 
+# 自啟動
+mslnk = "0.1.8"
+
 # 日誌
 log = { version = "0.4", features = ["release_max_level_info"] }
 simplelog = "0.12"
