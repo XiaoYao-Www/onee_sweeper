@@ -1,0 +1,20 @@
+<svg width="900" height="900" xmlns="http://www.w3.org/2000/svg">
+ <g>
+  <title>Layer 1</title>
+  <rect fill="#333333" stroke="#333333" stroke-width="0" x="0" y="0" width="900" height="900" id="svg_32" rx="100"/>
+  <rect rx="30" id="svg_1" height="335.00002" width="80" y="35.66666" x="410" stroke-width="0" stroke="#ffff00" fill="#ffff00"/>
+  <rect id="svg_2" height="202.99999" width="610" y="372.66667" x="145" stroke-width="0" stroke="#ffff00" fill="#ffff00"/>
+  <rect rx="30" id="svg_4" height="70" width="610" y="330" x="145" stroke-width="0" stroke="#ffff00" fill="#ffff00"/>
+  <rect rx="10" id="svg_20" height="249" width="34" y="554.66666" x="145" stroke-width="0" stroke="#ffff00" fill="#ffff00"/>
+  <rect rx="10" id="svg_45" height="249" width="34" y="554.66666" x="209" stroke-width="0" stroke="#ffff00" fill="#ffff00"/>
+  <rect rx="10" id="svg_46" height="249" width="34" y="554.66666" x="273" stroke-width="0" stroke="#ffff00" fill="#ffff00"/>
+  <rect rx="10" id="svg_47" height="249" width="34" y="554.66666" x="337" stroke-width="0" stroke="#ffff00" fill="#ffff00"/>
+  <rect rx="10" id="svg_48" height="249" width="34" y="554.66666" x="401" stroke-width="0" stroke="#ffff00" fill="#ffff00"/>
+  <rect rx="10" id="svg_49" height="249" width="34" y="554.66666" x="465" stroke-width="0" stroke="#ffff00" fill="#ffff00"/>
+  <rect rx="10" id="svg_50" height="249" width="34" y="554.66666" x="529" stroke-width="0" stroke="#ffff00" fill="#ffff00"/>
+  <rect rx="10" id="svg_51" height="249" width="34" y="554.66666" x="593" stroke-width="0" stroke="#ffff00" fill="#ffff00"/>
+  <rect rx="10" id="svg_52" height="249" width="34" y="554.66666" x="657" stroke-width="0" stroke="#ffff00" fill="#ffff00"/>
+  <rect rx="10" id="svg_53" height="249" width="34" y="554.66666" x="721" stroke-width="0" stroke="#ffff00" fill="#ffff00"/>
+ </g>
+
+</svg>

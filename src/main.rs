@@ -24,6 +24,7 @@ use std::env;
 use std::time::{ Instant, Duration, SystemTime, UNIX_EPOCH };
 use globset::{ Glob, GlobSetBuilder };
 use mslnk::ShellLink;
+use notify_rust::Notification;
 
 use type_define::Config;
 
@@ -185,7 +186,7 @@ fn create_startup_link() -> io::Result<()> {
 /// ### 移除開機啟動
 ///
 /// 刪除位於啟動資料夾中的快捷方式。
-/// 
+///
 /// 回傳是否有移除連結
 fn remove_startup_link() -> io::Result<bool> {
     // 1. 獲取開機啟動目錄
@@ -245,21 +246,45 @@ impl App {
 
     /// ### 重新載入配置
     fn reload_config(&mut self) {
-        let new_config = read_config();
+        let new_config: Option<Config> = read_config();
 
         // 只有成功載入新配置才更新
         match new_config {
             Some(cfg) => {
-                info!("配置更新成功");
                 self.config = Some(cfg);
                 // 刷新任務計時
                 let now_instant: Instant = Instant::now();
                 self.last_complete_scan = now_instant;
                 self.last_small_scan = now_instant;
+                info!("配置更新成功");
+                Notification::new()
+                    .appname("ONEE SWEEPER")
+                    .summary("更新成功")
+                    .body("配置更新成功。")
+                    .timeout(5000)
+                    .show()
+                    .unwrap();
             }
             None => {
                 warn!("配置更新失敗，保持原有配置");
                 // 不更新 self.config，保持原有配置繼續運行
+                if self.config.is_none() {
+                    Notification::new()
+                        .appname("ONEE SWEEPER")
+                        .summary("更新失敗")
+                        .body("配置更新失敗，程序未運行，詳情請查閱日誌文件。")
+                        .timeout(5000)
+                        .show()
+                        .unwrap();
+                } else {
+                    Notification::new()
+                        .appname("ONEE SWEEPER")
+                        .summary("更新失敗")
+                        .body("配置更新失敗，保持原有配置，詳情請查閱日誌文件。")
+                        .timeout(5000)
+                        .show()
+                        .unwrap();
+                }
             }
         }
 
@@ -1119,14 +1144,59 @@ impl ApplicationHandler for App {
                 self.reload_config();
             } else if event.id == self.creat_startup_link.id() {
                 match create_startup_link() {
-                    Ok(()) => info!("創建啟動鏈接成功"),
-                    Err(e) => error!("創建啟動鏈接失敗{}", e)
+                    Ok(()) => {
+                        info!("創建啟動鏈接成功");
+                        Notification::new()
+                            .appname("ONEE SWEEPER")
+                            .summary("創建成功")
+                            .body("創建啟動鏈接成功。")
+                            .timeout(5000)
+                            .show()
+                            .unwrap();
+                    }
+                    Err(e) => {
+                        error!("創建啟動鏈接失敗{}", e);
+                        Notification::new()
+                            .appname("ONEE SWEEPER")
+                            .summary("創建失敗")
+                            .body("創建啟動鏈接失敗，詳情請查閱日誌文件。")
+                            .timeout(5000)
+                            .show()
+                            .unwrap();
+                    }
                 }
             } else if event.id == self.remove_startup_link.id() {
                 match remove_startup_link() {
-                    Ok(true) => info!("已移除啟動連結"),
-                    Ok(false) => info!("未找到啟動連結"),
-                    Err(e) => error!("移除啟動鏈接失敗{}", e)
+                    Ok(true) => {
+                        info!("已移除啟動連結");
+                        Notification::new()
+                            .appname("ONEE SWEEPER")
+                            .summary("移除成功")
+                            .body("已移除啟動連結。")
+                            .timeout(5000)
+                            .show()
+                            .unwrap();
+                    }
+                    Ok(false) => {
+                        info!("未找到啟動連結");
+                        Notification::new()
+                            .appname("ONEE SWEEPER")
+                            .summary("移除失敗")
+                            .body("未找到啟動連結。")
+                            .timeout(5000)
+                            .show()
+                            .unwrap();
+                    }
+                    Err(e) => {
+                        error!("移除啟動鏈接失敗{}", e);
+                        Notification::new()
+                            .appname("ONEE SWEEPER")
+                            .summary("移除失敗")
+                            .body("移除啟動鏈接失敗，詳情請查閱日誌文件。")
+                            .timeout(5000)
+                            .show()
+                            .unwrap();
+                    }
                 }
             }
         }
@@ -1151,7 +1221,17 @@ fn main() -> io::Result<()> {
     }; // 創建事件迴圈
 
     // 讀取配置並清理舊日誌
-    let config: Option<Config> = read_config();
+    let config: Option<Config> = read_config(); // 讀取配置文件
+    if config.is_none() {
+        Notification::new()
+            .appname("ONEE SWEEPER")
+            .summary("配置錯誤")
+            .body("配置錯誤，程序未運行，詳情請查閱日誌文件。")
+            .timeout(5000)
+            .show()
+            .unwrap();
+    }
+
     let log_max_size: u64 = config // 紀錄檔最大檔案大小 ( mb )
         .as_ref()
         .and_then(|c: &Config| c.app_setting.log_max_size_mb)
