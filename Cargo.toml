@@ -8,32 +8,25 @@ tray-icon = "0.22.0"
 winit = "0.30.13"
 image = "0.25.10"
 
-# 自啟動
-mslnk = "0.1.8"
 
+mslnk = "0.1.8" # 自啟動
 # 日誌
 log = { version = "0.4", features = ["release_max_level_info"] }
 simplelog = "0.12"
-
 # toml
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "0.9.8"
-
-# 路徑
-globset = "0.4.18"
-
+globset = "0.4.18" # 路徑
 # 二進制讀寫
 rkyv = { version = "0.8", features = ["alloc", "bytecheck"] }
 bytemuck = { version = "1.14", features = ["derive"] }
+trash = "5.2" # 垃圾桶
+edit = "0.1.5" # 文字編輯器
+notify-rust = "4.14.0" # 通知
+notify = "8.2.0" # 檔案監控
+crossbeam-channel = "0.5.15" # 平衡速度與大小
 
-# 垃圾桶
-trash = "5.2"
 
-# 文字編輯器
-edit = "0.1.5"
-
-# 通知
-notify-rust = "4.14.0"
 
 [profile.release]
 opt-level = 3

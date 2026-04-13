@@ -7,8 +7,8 @@ use log::{ info, warn, error, debug };
 use simplelog::*;
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
-    event_loop::{ ActiveEventLoop, ControlFlow, EventLoop },
+    event::{ self, WindowEvent },
+    event_loop::{ ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy },
 };
 use tray_icon::{
     Icon,
@@ -17,20 +17,111 @@ use tray_icon::{
     menu::{ Menu, MenuItem, MenuEvent, PredefinedMenuItem },
 };
 use image::{ ImageBuffer, Rgba };
-use std::fs::{ self, File };
-use std::path::{ Path, PathBuf };
-use std::io::{ self };
-use std::env;
-use std::time::{ Instant, Duration, SystemTime, UNIX_EPOCH };
+use std::{
+    fs::{ self, File },
+    path::{ Path, PathBuf },
+    io::{ self },
+    env,
+    time::{ Instant, Duration, SystemTime, UNIX_EPOCH },
+    thread,
+    collections::HashSet,
+};
 use globset::{ Glob, GlobSetBuilder };
 use mslnk::ShellLink;
 use notify_rust::Notification;
+use notify::{ RecommendedWatcher, RecursiveMode, Watcher, EventKind };
+use crossbeam_channel::{ unbounded, select };
 
 use type_define::Config;
+
+use crate::type_define::AppSettings;
 
 const CONFIG_TOML_PATH: &str = "config.toml";
 const LOG_FILE_NAME: &str = "run.log";
 const TEMP_BIN_PATH: &str = "temp.bin";
+
+// 檔案系統監控事件
+enum FileEvent {
+    ConfigChanged, // 配置文件變更
+    FileChanged(PathBuf), // 檔案變更 ( 非配置文件 )
+}
+
+// 監控系統命令
+enum WatchCommand {
+    Watch(PathBuf), // 監控路徑
+    Unwatch(PathBuf), // 取消監控路徑
+    UnwatchAll, // 取消所有監控路徑
+    ReplaceAll(Vec<PathBuf>), // 替換所有路徑
+    Stop, // 停止監控
+}
+
+fn start_watcher(proxy: EventLoopProxy<FileEvent>) -> crossbeam_channel::Sender<WatchCommand> {
+    let (cmd_tx, cmd_rx) = unbounded::<WatchCommand>();
+
+    thread::spawn(move || {
+        let (event_tx, event_rx) = unbounded();
+
+        let mut watcher: notify::ReadDirectoryChangesWatcher = RecommendedWatcher::new(
+            move |res: Result<notify::Event, notify::Error>| {
+                let _ = event_tx.send(res);
+            },
+            notify::Config::default()
+        ).unwrap();
+
+        let mut watched_paths: HashSet<PathBuf> = HashSet::new();
+
+        loop {
+            select! {
+                // 🟢 notify event
+                recv(event_rx) -> res => {
+                    if let Ok(Ok(event)) = res {
+                        match event.kind {
+                            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_) => {
+                                for path in event.paths {
+                                    let _ = proxy.send_event(
+                                        FileEvent::FileChanged(path)
+                                    );
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                // 🔵 command
+                recv(cmd_rx) -> cmd => {
+                    match cmd {
+                        Ok(WatchCommand::Watch(path)) => {
+                            let _ = watcher.watch(&path, RecursiveMode::Recursive);
+                            watched_paths.insert(path);
+                        }
+                        Ok(WatchCommand::Unwatch(path)) => {
+                            let _ = watcher.unwatch(&path);
+                            watched_paths.remove(&path);
+                        }
+                        Ok(WatchCommand::Stop) | Err(_) => break,
+                        Ok(WatchCommand::UnwatchAll) => {
+                            for path in watched_paths.drain() {
+                                let _ = watcher.unwatch(&path);
+                            }
+                        },
+                        Ok(WatchCommand::ReplaceAll(paths)) => {
+                            for old_path in watched_paths.drain() {
+                                let _ = watcher.unwatch(&old_path);
+                            }
+                            for new_path in paths {
+                                let _ = watcher.watch(&new_path, RecursiveMode::Recursive);
+                                watched_paths.insert(new_path);
+                            }
+                        },
+                    }
+                }
+            }
+        }
+    });
+
+    cmd_tx
+}
 
 /// ### 初始化日志系統
 ///
@@ -209,6 +300,11 @@ fn remove_startup_link() -> io::Result<bool> {
 
 /// ### 應用程序結構
 struct App {
+    proxy: EventLoopProxy<FileEvent>, // 文件事件代理
+    watcher_cmd: crossbeam_channel::Sender<WatchCommand>, // 監控命令發射器
+    pending_paths: HashSet<PathBuf>, // 等待處理路徑
+    last_process_watcher_path: Instant, // 最後一次處理監控路徑的時間戳
+
     tray_icon: Option<TrayIcon>, // 圖標
     open_config: MenuItem, // 打開配置
     open_log: MenuItem, // 打開日誌
@@ -251,11 +347,25 @@ impl App {
         // 只有成功載入新配置才更新
         match new_config {
             Some(cfg) => {
-                self.config = Some(cfg);
                 // 刷新任務計時
                 let now_instant: Instant = Instant::now();
                 self.last_complete_scan = now_instant;
                 self.last_small_scan = now_instant;
+
+                // 註冊檔案監測
+                self.watcher_cmd
+                    .send(
+                        WatchCommand::ReplaceAll(
+                            cfg.tasks
+                                .iter()
+                                .map(|t: &type_define::FolderTask| t.folder_path.clone())
+                                .collect()
+                        )
+                    )
+                    .unwrap();
+
+                self.config = Some(cfg);
+
                 info!("配置更新成功");
                 Notification::new()
                     .appname("ONEE SWEEPER")
@@ -1020,7 +1130,7 @@ impl App {
 }
 
 // ########## 應用基本定義 ##########
-impl ApplicationHandler for App {
+impl ApplicationHandler<FileEvent> for App {
     // 啟動: 初始化圖標
     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
         if self.tray_icon.is_none() {
@@ -1070,13 +1180,39 @@ impl ApplicationHandler for App {
         _event: WindowEvent
     ) {}
 
-    // 處理自定義事件
+    // 處理自訂事件
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: FileEvent) {
+        match event {
+            FileEvent::FileChanged(path) => {
+                self.pending_paths.insert(path);
+            }
+            FileEvent::ConfigChanged => {
+                self.reload_config();
+            }
+        }
+    }
+
+    // 處理等待事件
     fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         let now: Instant = Instant::now();
 
         // 任務調度：計算下一次需要喚醒的時間點，並設置事件循環在該時間點喚醒
         let mut next_wakeup: Instant = now + Duration::from_secs(3600); // 預設睡一小時（如果沒任務）
 
+        // 事件驅動
+        // 風門(throttle)，非防彈跳
+        if !self.pending_paths.is_empty() {
+            if now - self.last_process_watcher_path >= Duration::from_secs(3) {
+                for path in self.pending_paths.drain() {
+                    println!("{}", path.display());
+                }
+                self.last_process_watcher_path = now;
+            }else {
+                next_wakeup = self.last_process_watcher_path + Duration::from_secs(3);
+            }
+        }
+
+        // 掃描
         if let Some(cfg) = &self.config {
             // 判斷掃描狀態
             let s_interval: Duration = Duration::from_secs(
@@ -1111,7 +1247,7 @@ impl ApplicationHandler for App {
             // 計算下一次喚醒時間，使用更精確的調度
             let next_s_time: Instant = self.last_small_scan + s_interval;
             let next_c_time: Instant = self.last_complete_scan + c_interval;
-            next_wakeup = next_s_time.min(next_c_time);
+            next_wakeup = next_wakeup.min(next_s_time.min(next_c_time));
 
             // 如果計算出的喚醒時間已經過去，設為立即喚醒
             if next_wakeup <= now {
@@ -1123,7 +1259,7 @@ impl ApplicationHandler for App {
         event_loop.set_control_flow(ControlFlow::WaitUntil(next_wakeup));
 
         // 處理選單事件
-        if let Ok(event) = MenuEvent::receiver().try_recv() {
+        while let Ok(event) = MenuEvent::receiver().try_recv() {
             debug!("選單點擊事件: {:?}", event);
 
             if event.id == self.quit_item.id() {
@@ -1212,13 +1348,16 @@ fn main() -> io::Result<()> {
 
     info!("程序啟動");
 
-    let event_loop: EventLoop<()> = match EventLoop::new() {
+    let event_loop: EventLoop<FileEvent> = match EventLoop::with_user_event().build() {
         Ok(el) => el,
         Err(e) => {
             error!("創建事件迴圈失敗: {}", e);
             return Err(io::Error::new(io::ErrorKind::Other, e.to_string()));
         }
     }; // 創建事件迴圈
+
+    let proxy: EventLoopProxy<FileEvent> = event_loop.create_proxy();
+    let watcher_cmd: crossbeam_channel::Sender<WatchCommand> = start_watcher(proxy.clone());
 
     // 讀取配置並清理舊日誌
     let config: Option<Config> = read_config(); // 讀取配置文件
@@ -1244,6 +1383,10 @@ fn main() -> io::Result<()> {
     // 初始化應用狀態
     let now_instant: Instant = Instant::now();
     let mut app: App = App {
+        proxy: proxy.clone(),
+        watcher_cmd: watcher_cmd,
+        pending_paths: HashSet::new(),
+        last_process_watcher_path: Instant::now(),
         tray_icon: None,
         open_config: MenuItem::new("開啟配置", true, None),
         open_log: MenuItem::new("查看日誌", true, None),
