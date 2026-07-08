@@ -1,0 +1,30 @@
+[package]
+name = "onee_sweeper_daemon"
+version = "3.0.0"
+description = "ONEE SWEEPER 背景服務 — 檔案監控、掃描與清理"
+edition = "2021"
+
+[dependencies]
+tray-icon = "0.24.1"
+winit = "0.30.13"
+image = "0.25.10"
+
+mimalloc = "0.1"
+mslnk = "0.1.8" # 自啟動
+# 日誌
+log = { version = "0.4.33", features = ["release_max_level_info"] }
+simplelog = "0.12"
+# toml
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.1.2"
+globset = "0.4.18" # 路徑匹配
+# 二進制讀寫
+rkyv = { version = "0.8.17", features = ["alloc", "bytecheck"] }
+bytemuck = { version = "1.14", features = ["derive"] }
+trash = "5.2.6" # 垃圾桶
+edit = "0.1.5" # 文字編輯器
+notify-rust = "4.18.0" # 系統通知
+notify = "8.2.0" # 檔案監控
+crossbeam-channel = "0.5.16"
+blake3 = "1.8.5"
+

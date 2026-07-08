@@ -58,7 +58,7 @@ impl ScanFolderData {
     pub fn new(folder_path: &Path) -> Self {
         Self {
             folder_path: path_to_bytes(folder_path),
-            entries: HashMap::new(),
+            entries: HashMap::with_capacity(256), // 預分配 256 以避免頻繁重新分配
         }
     }
 
@@ -275,9 +275,16 @@ impl ScanDatabase {
         for folder_key in empty_folders {
             self.folders.remove(&folder_key);
         }
-        
+        // 移除空資料夾後收縮外部 HashMap
+        self.folders.shrink_to_fit();
+
         if total_removed > 0 {
             info!("清理了 {} 個不存在的路徑記錄", total_removed);
+        }
+
+        // 清理後收縮過大的 entries，降低記憶體占用
+        for folder_data in self.folders.values_mut() {
+            folder_data.entries.shrink_to_fit();
         }
     }
 
@@ -286,5 +293,60 @@ impl ScanDatabase {
         let folder_count = self.folders.len();
         let entry_count: usize = self.folders.values().map(|f| f.entries.len()).sum();
         (folder_count, entry_count)
+    }
+
+    /// ### 計算與另一個資料庫的差異
+    ///
+    /// 比較當前資料庫與「舊」版本，計算新增／修改／刪除的檔案數量。
+    pub fn diff(&self, old: &ScanDatabase) -> ScanDiff {
+        let mut added = 0usize;
+        let mut modified = 0usize;
+        let mut removed = 0usize;
+
+        for (folder_key, folder_data) in &self.folders {
+            let old_folder = old.folders.get(folder_key);
+
+            for (entry_key, &new_time) in &folder_data.entries {
+                match old_folder.and_then(|f| f.entries.get(entry_key)) {
+                    None => added += 1,
+                    Some(&old_time) if old_time != new_time => modified += 1,
+                    _ => {}
+                }
+            }
+
+            if let Some(old_data) = old_folder {
+                for old_entry_key in old_data.entries.keys() {
+                    if !folder_data.entries.contains_key(old_entry_key) {
+                        removed += 1;
+                    }
+                }
+            }
+        }
+
+        for (old_folder_key, old_folder_data) in &old.folders {
+            if !self.folders.contains_key(old_folder_key) {
+                removed += old_folder_data.entries.len();
+            }
+        }
+
+        ScanDiff { added, modified, removed }
+    }
+}
+
+/// 掃描差異報告
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScanDiff {
+    pub added: usize,
+    pub modified: usize,
+    pub removed: usize,
+}
+
+impl std::fmt::Display for ScanDiff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "新增 {} 個，修改 {} 個，移除 {} 個",
+            self.added, self.modified, self.removed
+        )
     }
 }

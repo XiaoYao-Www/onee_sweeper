@@ -1,13 +1,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// 使用 mimalloc 作為全域分配器，降低記憶體碎片化（尤其是在 Windows 上）
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod type_define;
 mod scanner;
 mod config;
+mod audit_log;
 
 use log::{ info, warn, error, debug };
 use simplelog::*;
 use winit::{
     application::ApplicationHandler,
-    event::{ self, WindowEvent },
+    event::{ WindowEvent },
     event_loop::{ ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy },
 };
 use tray_icon::{
@@ -34,11 +39,13 @@ use crossbeam_channel::{ unbounded, select };
 
 use type_define::Config;
 
-use crate::type_define::AppSettings;
-
 const CONFIG_TOML_PATH: &str = "config.toml";
 const LOG_FILE_NAME: &str = "run.log";
 const TEMP_BIN_PATH: &str = "temp.bin";
+/// UI 與 daemon 之間的簡易檔案級 IPC：UI 寫入此檔案來觸發立即掃描
+const IPC_SIGNAL_PATH: &str = "command.signal";
+/// daemon 啟動時寫入 PID，讓 UI 判斷 daemon 是否在執行
+const DAEMON_PID_PATH: &str = "daemon.pid";
 
 // 檔案系統監控事件
 enum FileEvent {
@@ -46,7 +53,8 @@ enum FileEvent {
     FileChanged(PathBuf), // 檔案變更 ( 非配置文件 )
 }
 
-// 監控系統命令
+// 監控系統命令（部分枚舉變體保留供未來擴展）
+#[allow(dead_code)]
 enum WatchCommand {
     Watch(PathBuf), // 監控路徑
     Unwatch(PathBuf), // 取消監控路徑
@@ -55,7 +63,7 @@ enum WatchCommand {
     Stop, // 停止監控
 }
 
-fn start_watcher(proxy: EventLoopProxy<FileEvent>) -> crossbeam_channel::Sender<WatchCommand> {
+fn start_watcher(proxy: EventLoopProxy<FileEvent>, config_path: Option<PathBuf>) -> crossbeam_channel::Sender<WatchCommand> {
     let (cmd_tx, cmd_rx) = unbounded::<WatchCommand>();
 
     thread::spawn(move || {
@@ -70,6 +78,17 @@ fn start_watcher(proxy: EventLoopProxy<FileEvent>) -> crossbeam_channel::Sender<
 
         let mut watched_paths: HashSet<PathBuf> = HashSet::new();
 
+        // 如果提供了設定檔路徑，監控其所在目錄（notify 需要監控父目錄才能捕獲檔案變更）
+        let config_path_for_watch: Option<PathBuf> = config_path.clone();
+        if let Some(ref cfg_path) = config_path {
+            if let Some(parent) = cfg_path.parent() {
+                if parent.exists() {
+                    let _ = watcher.watch(parent, RecursiveMode::NonRecursive);
+                    info!("已註冊設定檔監控: {:?}", cfg_path);
+                }
+            }
+        }
+
         loop {
             select! {
                 // 🟢 notify event
@@ -78,6 +97,14 @@ fn start_watcher(proxy: EventLoopProxy<FileEvent>) -> crossbeam_channel::Sender<
                         match event.kind {
                             EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_) => {
                                 for path in event.paths {
+                                    // 檢查是否為設定檔變更
+                                    if let Some(ref cfg_path) = config_path_for_watch {
+                                        if path == *cfg_path || path.ends_with("config.toml") {
+                                            let _ = proxy.send_event(FileEvent::ConfigChanged);
+                                            info!("偵測到設定檔變更");
+                                            continue;
+                                        }
+                                    }
                                     let _ = proxy.send_event(
                                         FileEvent::FileChanged(path)
                                     );
@@ -126,6 +153,9 @@ fn start_watcher(proxy: EventLoopProxy<FileEvent>) -> crossbeam_channel::Sender<
 /// ### 初始化日志系統
 ///
 /// 設置 simplelog 日誌系統，將日誌輸出到 run.log 文件和控制台
+/// ### 初始化日誌系統
+/// 同時輸出到終端機（Debug 等級）和 run.log 檔案（Info 等級）。
+/// daemon 啟動時呼叫一次。
 fn init_logging() -> io::Result<()> {
     let log_path: PathBuf = get_file_path(LOG_FILE_NAME)?;
 
@@ -150,6 +180,11 @@ fn init_logging() -> io::Result<()> {
 /// ### 清理舊日誌
 ///
 /// 當日誌文件超過指定大小時清空內容
+/// ### 清理過大的舊日誌檔案
+/// 當 run.log 超過指定大小（MB）時，備份為 run.log.old 並建立新檔案。
+/// 防止日誌檔案無限增長佔用磁碟空間。
+///
+/// - max_size_mb: 觸發清理的檔案大小閾值（MB）
 fn cleanup_old_logs(max_size_mb: u64) -> io::Result<()> {
     let log_path: PathBuf = get_file_path(LOG_FILE_NAME)?;
 
@@ -178,6 +213,11 @@ fn cleanup_old_logs(max_size_mb: u64) -> io::Result<()> {
 /// 取得基於當前執行檔 (.exe) 的檔案位置。
 ///
 /// - file_path 相對位置
+/// ### 獲取基於當前執行檔的完整檔案路徑
+/// 所有資料檔案（config.toml, temp.bin, run.log 等）都存放在 .exe 所在目錄，
+/// 確保 daemon 和 UI 共用同一份資料。
+///
+/// - file_path: 相對於執行檔目錄的檔案名稱
 fn get_file_path(file_path: &str) -> io::Result<PathBuf> {
     // 獲取當前執行檔 (.exe) 的完整路徑
     let mut path: PathBuf = env::current_exe()?;
@@ -253,6 +293,9 @@ fn read_config() -> Option<Config> {
 /// ### 創建開機啟動
 ///
 /// 創建開機啟動連結。
+/// ### 創建 Windows 開機自動啟動捷徑
+/// 在開始功能表的啟動資料夾中建立 .lnk 捷徑，
+/// 讓 daemon 隨 Windows 開機自動啟動。
 fn create_startup_link() -> io::Result<()> {
     let exe_path: PathBuf = env::current_exe()?; // 獲取執行檔的路徑
 
@@ -279,6 +322,8 @@ fn create_startup_link() -> io::Result<()> {
 /// 刪除位於啟動資料夾中的快捷方式。
 ///
 /// 回傳是否有移除連結
+/// ### 移除 Windows 開機自動啟動捷徑
+/// 回傳是否成功找到並刪除捷徑。
 fn remove_startup_link() -> io::Result<bool> {
     // 1. 獲取開機啟動目錄
     let mut startup_path: PathBuf = PathBuf::from(
@@ -298,8 +343,78 @@ fn remove_startup_link() -> io::Result<bool> {
     }
 }
 
+/// ### 取得當前程序的記憶體使用量（MB）
+///
+/// 在 Windows 上使用 GetProcessMemoryInfo，其他平台回傳 0（不限制）。
+/// 用於在掃描迴圈中檢查是否超過 max_memory_mb 設定。
+#[cfg(windows)]
+fn get_current_memory_mb() -> u64 {
+    #[allow(non_snake_case, dead_code)]
+    // 直接連結 psapi.dll，不需要 windows-sys 的類型系統
+    #[link(name = "psapi")]
+    extern "system" {
+        fn GetProcessMemoryInfo(
+            hProcess: isize,
+            ppmem_counters: *mut std::ffi::c_void,
+            cb: u32,
+        ) -> i32;
+        fn GetCurrentProcess() -> isize;
+    }
+
+    #[allow(non_snake_case)]
+    // PROCESS_MEMORY_COUNTERS 結構（Windows SDK 定義）
+    #[repr(C)]
+    struct PROCESS_MEMORY_COUNTERS {
+        cb: u32,
+        PageFaultCount: u32,
+        PeakWorkingSetSize: usize,
+        WorkingSetSize: usize,         // bytes，這就是我們要的值
+        QuotaPeakPagedPoolUsage: usize,
+        QuotaPagedPoolUsage: usize,
+        QuotaPeakNonPagedPoolUsage: usize,
+        QuotaNonPagedPoolUsage: usize,
+        PagefileUsage: usize,
+        PeakPagefileUsage: usize,
+    }
+
+    let mut pmc = PROCESS_MEMORY_COUNTERS {
+        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        PageFaultCount: 0,
+        PeakWorkingSetSize: 0,
+        WorkingSetSize: 0,
+        QuotaPeakPagedPoolUsage: 0,
+        QuotaPagedPoolUsage: 0,
+        QuotaPeakNonPagedPoolUsage: 0,
+        QuotaNonPagedPoolUsage: 0,
+        PagefileUsage: 0,
+        PeakPagefileUsage: 0,
+    };
+
+    let ret = unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut pmc as *mut _ as *mut std::ffi::c_void,
+            std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        )
+    };
+
+    if ret != 0 {
+        pmc.WorkingSetSize as u64 / (1024 * 1024)
+    } else {
+        0
+    }
+}
+
+#[cfg(not(windows))]
+fn get_current_memory_mb() -> u64 { 0 }
+
 /// ### 應用程序結構
+/// ### 應用程式主結構
+///
+/// 持有事件迴圈代理、檔案監控、系統托盤圖標、配置等所有狀態。
+/// 實作 winit ApplicationHandler trait 作為事件驅動核心。
 struct App {
+    #[allow(dead_code)]
     proxy: EventLoopProxy<FileEvent>, // 文件事件代理
     watcher_cmd: crossbeam_channel::Sender<WatchCommand>, // 監控命令發射器
     pending_paths: HashSet<PathBuf>, // 等待處理路徑
@@ -307,6 +422,8 @@ struct App {
 
     tray_icon: Option<TrayIcon>, // 圖標
     open_config: MenuItem, // 打開配置
+    /// 開啟 UI 設定面板（啟動 onee_sweeper_ui.exe）
+    open_ui: MenuItem,
     open_log: MenuItem, // 打開日誌
     refresh_config: MenuItem, // 刷新配置
     creat_startup_link: MenuItem, // 創建開機啟動連結
@@ -316,6 +433,9 @@ struct App {
     config: Option<Config>, // 配置文件
     last_small_scan: Instant, // 上次小掃描時間
     last_complete_scan: Instant, // 上次完整掃描時間
+    last_user_activity: Instant, // 上次使用者活動時間（用於閒置偵測）
+    /// 追蹤上一輪的閒置狀態（None = 第一輪，避免刷屏日誌）
+    was_user_idle: Option<bool>,
 }
 
 // ########## 應用功能 ##########
@@ -326,9 +446,9 @@ impl App {
     fn change_icon(&mut self) {
         if let Some(tray) = self.tray_icon.as_mut() {
             let icon_result = if self.config.is_some() {
-                load_icon(include_bytes!("../assets/icon_run.ico"))
+                load_icon(include_bytes!("../../assets/icon_run.ico"))
             } else {
-                load_icon(include_bytes!("../assets/icon_stop.ico"))
+                load_icon(include_bytes!("../../assets/icon_stop.ico"))
             };
 
             match icon_result {
@@ -406,7 +526,17 @@ impl App {
     /// 根據 is_complete 參數決定執行完整掃描還是快速掃描，並且會抓取刪除目標
     ///
     /// - is_complete 是否執行完整掃描
+/// ### 執行一次排程掃描（完整或快速）
+///
+/// 載入資料庫，遍歷所有已啟用的任務，根據類型執行：
+/// - 完整掃描（is_complete=true）：遞迴遍歷目錄，發現新檔案並判斷過期
+/// - 快速掃描（is_complete=false）：僅查詢現有資料庫記錄，不實際讀取檔案系統
+///
     fn perform_scan(&self, is_complete: bool) {
+// - is_complete: true = 完整掃描，false = 快速掃描
+        let memory_limit_mb: u64 = self.config.as_ref()
+            .map(|c| c.app_setting.max_memory_mb_effective())
+            .unwrap_or(0);
         let label: &str = if is_complete { "完整掃描" } else { "快速掃描" };
         info!("====================");
         info!("正在執行: {}", label);
@@ -434,6 +564,12 @@ impl App {
             let mut task_success = 0;
 
             for task in &cfg.tasks {
+                // 檢查任務是否已停用（enabled = false）
+                if !task.is_enabled() {
+                    debug!("  任務已停用，跳過: {}", task.folder_path.to_string_lossy());
+                    continue;
+                }
+
                 info!("檢查資料夾: {}", task.folder_path.to_string_lossy());
 
                 if !task.folder_path.exists() {
@@ -468,7 +604,8 @@ impl App {
                         task.target.as_ref(),
                         threshold_secs,
                         task.really_delete.unwrap_or(false),
-                        cfg.app_setting.test_mode.unwrap_or(false)
+                        cfg.app_setting.test_mode.unwrap_or(false),
+                        task.follow_symlinks_effective()
                     )
                 } else {
                     // 小掃描：僅讀取記錄判斷
@@ -495,10 +632,30 @@ impl App {
 
             info!("任務結果: 成功 {} 個，失敗 {} 個", task_success, task_errors);
 
+            // 🔍 記憶體用量檢查：如果超過 max_memory_mb 設定，主動釋放
+            if memory_limit_mb > 0 {
+                let used_mb = get_current_memory_mb();
+                if used_mb > memory_limit_mb {
+                    info!("記憶體用量 {} MB 超過上限 {} MB，強制釋放", used_mb, memory_limit_mb);
+                    db.cleanup_nonexistent_entries();
+                    db.folders.shrink_to_fit();
+                    if let Err(e) = db.save_to_file(&temp_bin_path) {
+                        error!("記憶體釋放時儲存失敗: {}", e);
+                    }
+                    if let Ok(new_db) = scanner::ScanDatabase::load_from_file(&temp_bin_path, false) {
+                        db = new_db;
+                    }
+                }
+            }
+
             // 定期清理不存在的條目（每次完整掃描後）
             if is_complete {
                 db.cleanup_nonexistent_entries();
             }
+
+            // 掃描後統計
+            let (folder_count, entry_count) = db.get_stats();
+            info!("資料庫狀態: {} 個資料夾，{} 個路徑記錄", folder_count, entry_count);
 
             // 儲存資料庫
             if let Err(e) = db.save_to_file(&temp_bin_path) {
@@ -526,8 +683,37 @@ impl App {
         target: Option<&Vec<String>>,
         threshold_secs: u64,
         really_delete: bool,
-        test_mode: bool
+        test_mode: bool,
+        follow_symlinks: bool,
     ) -> io::Result<()> {
+        // 操作權限預檢
+        if !folder_path.is_dir() {
+            warn!("  ⚠ 任務資料夾不是有效目錄，跳過: {}", folder_path.display());
+            return Ok(());
+        }
+        // 檢查讀取權限：嘗試列出目錄內容
+        match fs::read_dir(folder_path) {
+            Ok(_) => {}
+            Err(e) => {
+                warn!("  ⚠ 無法讀取目錄（權限不足），跳過任務: {} - {}", folder_path.display(), e);
+                return Ok(());
+            }
+        }
+        // 如果啟用徹底刪除，額外檢查刪除權限
+        if really_delete {
+            let probe_file = folder_path.join(".onee_sweeper_perms_check");
+            match fs::File::create(&probe_file) {
+                Ok(_) => {
+                    // 成功創建後立即刪除
+                    let _ = fs::remove_file(&probe_file);
+                }
+                Err(e) => {
+                    warn!("  ⚠ 無法在目錄中創建/刪除文件（權限不足），跳過徹底刪除任務: {} - {}", folder_path.display(), e);
+                    return Ok(());
+                }
+            }
+        }
+
         let now: u64 = match SystemTime::now().duration_since(UNIX_EPOCH) {
             Ok(d) => d.as_secs(),
             Err(e) => {
@@ -536,7 +722,7 @@ impl App {
             }
         };
 
-        let mut to_delete: Vec<PathBuf> = Vec::new(); // 絕對路徑
+        let mut to_delete: Vec<PathBuf> = Vec::with_capacity(50); // 分批處理，初始容量 50
 
         // 創建匹配器
         let set: Option<globset::GlobSet> = if let Some(some_target) = target {
@@ -557,38 +743,46 @@ impl App {
             None
         };
 
-        // 遞迴掃描資料夾
-        self.scan_directory_recursive(
-            folder_path,
-            folder_path,
-            &set,
-            false,
-            threshold_secs,
-            now,
-            db,
-            &mut to_delete
-        )?;
+        // 分批掃描與刪除：每累積 BATCH_SIZE 個待刪除路徑就處理一次
+        const BATCH_SIZE: usize = 50;
 
-        // 執行刪除（優化後）
+        // 遞迴掃描資料夾（分批處理）
+            self.scan_directory_recursive_batched(
+                folder_path,
+                folder_path,
+                &set,
+                false,
+                threshold_secs,
+                now,
+                db,
+                &mut to_delete,
+                BATCH_SIZE,
+                really_delete,
+                test_mode,
+                follow_symlinks,
+            )?;
+
+        // 處理最後一批
         if !to_delete.is_empty() {
-            let optimized: Vec<PathBuf> = self.optimize_delete_paths(&to_delete, folder_path, db);
+            let optimized = self.optimize_delete_paths(&to_delete, folder_path, db);
             self.execute_deletions(&optimized, folder_path, really_delete, test_mode, db);
+            to_delete.clear();
         }
 
         Ok(())
     }
 
-    /// ### 遞迴掃描目錄
+    /// ### 遞迴掃描目錄（分批處理版）
     ///
-    /// - path 目標掃描目錄(絕對路徑)
-    /// - root 根目錄(任務目錄)
-    /// - target 目標(可選)
-    /// - in_target_folder 是否在目標目錄中
-    /// - threshold_secs 閥值(秒)
-    /// - now 現在時間(秒)
-    /// - db 資料庫
-    /// - to_delete 要刪除的目錄列表(絕對路徑)
-    fn scan_directory_recursive(
+    /// 與 scan_directory_recursive 功能相同，但在 to_delete 達到 batch_size 時
+    /// 自動執行刪除並清空緩衝區，降低尖峰記憶體使用。
+/// ### 遞迴掃描目錄（分批處理版）
+///
+/// 與傳統遞迴掃描功能相同，但在 to_delete 達到 batch_size 時自動執行批次刪除，
+/// 降低尖峰記憶體使用量。每批處理 50 個刪除目標。
+///
+/// - follow_symlinks: 是否跟隨符號連結（來自任務設定）
+    fn scan_directory_recursive_batched(
         &self,
         path: &Path,
         root: &Path,
@@ -597,84 +791,83 @@ impl App {
         threshold_secs: u64,
         now: u64,
         db: &mut scanner::ScanDatabase,
-        to_delete: &mut Vec<PathBuf>
+        to_delete: &mut Vec<PathBuf>,
+        batch_size: usize,
+        really_delete: bool,
+        test_mode: bool,
+        // 是否跟隨符號連結（來自任務設定）
+        follow_symlinks: bool,
     ) -> io::Result<()> {
         let entries: fs::ReadDir = fs::read_dir(path)?;
-        let mut max_child_modified: u64 = 0u64; // 追蹤子項目的最大修改時間
+        let mut max_child_modified: u64 = 0u64;
 
         for entry in entries {
-            /*
-                基本資訊取得
-             */
-            let entry: fs::DirEntry = entry?; // 處理errors
-            let entry_path: PathBuf = entry.path(); // 取得路徑(絕對)
-            let rela_path: PathBuf = // 取得相對路徑
-                entry_path
-                    .strip_prefix(root)
-                    .map_err(|e: std::path::StripPrefixError|
-                        io::Error::new(io::ErrorKind::Other, e.to_string())
-                    )?
-                    .to_path_buf();
-            let metadata: fs::Metadata = entry.metadata()?; // 取得原數據
+            let entry: fs::DirEntry = entry?;
+            let entry_path: PathBuf = entry.path();
+            let rela_path: PathBuf = entry_path
+                .strip_prefix(root)
+                .map_err(|e: std::path::StripPrefixError|
+                    io::Error::new(io::ErrorKind::Other, e.to_string())
+                )?
+                .to_path_buf();
+            let metadata: fs::Metadata = entry.metadata()?;
 
-            /*
-                匹配驗證 - 修正：確保有target時只刪除匹配的項目
-             */
             let is_match: bool = match target {
-                // 沒有target：所有項目都匹配
                 None => true,
-                // 有target：必須匹配pattern或在已匹配的父資料夾內
                 Some(match_set) => {
-                    // 檢查當前路徑是否匹配任何pattern
                     let path_matches = match_set.is_match(&rela_path);
-                    // 或者父資料夾已經匹配
                     path_matches || in_target_folder
                 }
             };
 
-            /*
-                掃描開始
-             */
-
             if metadata.is_dir() {
-                // 關鍵修正：不掃描和刪除任務根目錄
                 if entry_path == root {
                     warn!("  警告：跳過任務根目錄: {}", root.display());
                     continue;
                 }
 
-                // 資料夾：先遞迴掃描子目錄
-                self.scan_directory_recursive(
-                    &entry_path,
-                    root,
-                    target,
-                    is_match, // 如果當前資料夾匹配，子項目都在目標內
-                    threshold_secs,
-                    now,
-                    db,
-                    to_delete
-                )?;
-
-                if !is_match {
-                    // 不匹配 => 跳過處理
+                // 安全檢查：根據設定決定是否跳過符號連結
+                let is_symlink: bool = metadata.file_type().is_symlink();
+                if is_symlink && !follow_symlinks {
+                    warn!(
+                        "  ⚠ 跳過符號連結（follow_symlinks = false）: {} -> {}",
+                        rela_path.display(),
+                        fs::read_link(&entry_path).unwrap_or_default().display()
+                    );
                     continue;
                 }
 
-                // 檢查資料夾記錄
+                // 遞迴子目錄（分批）
+                self.scan_directory_recursive_batched(
+                    &entry_path,
+                    root,
+                    target,
+                    is_match,
+                    threshold_secs,
+                    now,
+                    db,
+                    to_delete,
+                    batch_size,
+                    really_delete,
+                    test_mode,
+                    follow_symlinks,
+                )?;
+
+                if !is_match {
+                    continue;
+                }
+
                 let recorded_time: u64 = if let Some(recorded) = db.get(root, &rela_path) {
                     recorded
                 } else {
-                    // 第一次發現，記錄當前時間
                     db.upsert(root, &rela_path, now);
                     now
                 };
 
-                // 更新父資料夾追蹤
                 if recorded_time > max_child_modified {
                     max_child_modified = recorded_time;
                 }
 
-                // 判斷資料夾是否超過閾值
                 if let Some(age) = now.checked_sub(recorded_time) {
                     if age >= threshold_secs {
                         to_delete.push(entry_path);
@@ -683,11 +876,10 @@ impl App {
                     warn!("  資料夾時間計算溢出，跳過: {}", rela_path.display());
                 }
 
-                continue; // 跳過檔案處理邏輯
+                continue;
             }
 
             if !is_match {
-                // 文件不匹配 => 跳過
                 continue;
             }
 
@@ -701,29 +893,22 @@ impl App {
                     }
                 };
 
-                // 檢查資料庫記錄
                 let recorded_time: u64 = if let Some(recorded) = db.get(root, &rela_path) {
-                    // 已有記錄：比較時間
                     if file_modified > recorded {
-                        // 檔案更新了，更新記錄
                         db.upsert(root, &rela_path, file_modified);
                         file_modified
                     } else {
-                        // 使用記錄時間
                         recorded
                     }
                 } else {
-                    // 第一次發現，記錄當前時間
                     db.upsert(root, &rela_path, now);
                     now
                 };
 
-                // 更新父資料夾追蹤
                 if recorded_time > max_child_modified {
                     max_child_modified = recorded_time;
                 }
 
-                // 判斷是否超過閾值
                 if let Some(age) = now.checked_sub(recorded_time) {
                     if age >= threshold_secs {
                         to_delete.push(entry_path);
@@ -732,12 +917,17 @@ impl App {
                     warn!("  時間計算溢出，跳過: {}", rela_path.display());
                 }
             }
+
+            // 達到批次大小時立即處理
+            if to_delete.len() >= batch_size {
+                let batch: Vec<PathBuf> = to_delete.drain(..).collect();
+                let optimized = self.optimize_delete_paths(&batch, root, db);
+                self.execute_deletions(&optimized, root, really_delete, test_mode, db);
+                info!("  批次刪除完成 ({} 個)", optimized.len());
+            }
         }
 
-        /*
-            更新當前資料夾的記錄時間
-            使用子項目的最大修改時間
-         */
+        // 更新當前資料夾的記錄時間
         if max_child_modified > 0 {
             let rela_path: &Path = path
                 .strip_prefix(root)
@@ -745,14 +935,12 @@ impl App {
                     io::Error::new(io::ErrorKind::Other, e.to_string())
                 )?;
 
-            // 只有非根目錄才更新
             if rela_path.as_os_str() != "" {
                 if let Some(current_recorded) = db.get(root, rela_path) {
                     if max_child_modified > current_recorded {
                         db.upsert(root, rela_path, max_child_modified);
                     }
                 } else {
-                    // 當前資料夾沒有記錄，創建記錄
                     db.upsert(root, rela_path, max_child_modified);
                 }
             }
@@ -1057,6 +1245,11 @@ impl App {
         test_mode: bool,
         db: &mut scanner::ScanDatabase
     ) {
+        // 初始化審計日誌（使用應用程式資料目錄）
+        let audit_log: Option<audit_log::AuditLog> = get_file_path("")
+            .ok()
+            .map(|base_dir| audit_log::AuditLog::new(&base_dir, 10)); // 最大 10 MB
+
         let mut success_count = 0;
         let mut fail_count = 0;
 
@@ -1086,21 +1279,37 @@ impl App {
                 continue;
             }
 
+            // 4. 計算刪除前 hash（用於審計日誌）
+            let pre_delete_hash: String = match audit_log::compute_file_hash(path) {
+                Ok(h) => h,
+                Err(_) => "HASH_FAILED".to_string(),
+            };
+            let file_size: u64 = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+
             if test_mode {
                 info!("  [測試模式] 將刪除: {}", path.display());
+                if let Some(ref log) = audit_log {
+                    let entry = audit_log::AuditEntry {
+                        timestamp: audit_log::current_timestamp(),
+                        operation: "TEST_DELETE".to_string(),
+                        file_path: path.to_path_buf(),
+                        file_size,
+                        hash: pre_delete_hash,
+                        result: "TEST_MODE".to_string(),
+                    };
+                    let _ = log.append(&entry);
+                }
                 success_count += 1;
                 continue;
             }
 
             let result: Result<(), io::Error> = if really_delete {
-                // 徹底刪除
                 if path.is_dir() {
                     fs::remove_dir_all(path)
                 } else {
                     fs::remove_file(path)
                 }
             } else {
-                // 移入垃圾桶
                 trash
                     ::delete(path)
                     .map_err(|e: trash::Error| io::Error::new(io::ErrorKind::Other, e))
@@ -1111,14 +1320,40 @@ impl App {
                     let method: &str = if really_delete { "徹底刪除" } else { "移入垃圾桶" };
                     info!("  ✓ {}: {}", method, path.display());
                     if let Ok(rela_path) = path.strip_prefix(task_folder) {
-                        // 從資料庫移除
                         db.remove(task_folder, rela_path);
                     }
                     success_count += 1;
+
+                    // 寫入審計日誌
+                    if let Some(ref log) = audit_log {
+                        let entry = audit_log::AuditEntry {
+                            timestamp: audit_log::current_timestamp(),
+                            operation: if really_delete { "PERMANENT_DELETE" } else { "TRASH_DELETE" }.to_string(),
+                            file_path: path.to_path_buf(),
+                            file_size,
+                            hash: pre_delete_hash,
+                            result: "SUCCESS".to_string(),
+                        };
+                        if let Err(e) = log.append(&entry) {
+                            warn!("  ⚠ 審計日誌寫入失敗: {}", e);
+                        }
+                    }
                 }
                 Err(e) => {
                     error!("  ✗ 刪除失敗: {} - {}", path.display(), e);
                     fail_count += 1;
+
+                    if let Some(ref log) = audit_log {
+                        let entry = audit_log::AuditEntry {
+                            timestamp: audit_log::current_timestamp(),
+                            operation: "DELETE_FAILED".to_string(),
+                            file_path: path.to_path_buf(),
+                            file_size,
+                            hash: pre_delete_hash,
+                            result: format!("FAILURE: {}", e),
+                        };
+                        let _ = log.append(&entry);
+                    }
                 }
             }
         }
@@ -1140,6 +1375,7 @@ impl ApplicationHandler<FileEvent> for App {
                 let Err(e) = tray_menu.append_items(
                     &[
                         &self.open_config,
+                        &self.open_ui,
                         &self.open_log,
                         &self.refresh_config,
                         &PredefinedMenuItem::separator(),
@@ -1202,19 +1438,80 @@ impl ApplicationHandler<FileEvent> for App {
         // 事件驅動
         // 風門(throttle)，非防彈跳
         if !self.pending_paths.is_empty() {
-            if now - self.last_process_watcher_path >= Duration::from_secs(3) {
-                for path in self.pending_paths.drain() {
-                    println!("{}", path.display());
+            // 使用 checked_duration_since 防止 Instant 非單調問題（suspend/resume 後跳變）
+            let elapsed: Duration = now.checked_duration_since(self.last_process_watcher_path)
+                .unwrap_or(Duration::ZERO);
+            if elapsed >= Duration::from_secs(3) {
+                // 載入資料庫以處理檔案變更事件
+                let temp_bin_path: PathBuf = match get_file_path(TEMP_BIN_PATH) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        warn!("無法解析暫存路徑，跳過檔案變更處理");
+                        self.pending_paths.clear();
+                        self.last_process_watcher_path = now;
+                        return;
+                    }
+                };
+
+                if let Ok(mut db) = scanner::ScanDatabase::load_from_file(&temp_bin_path, true) {
+                    let changes: Vec<PathBuf> = self.pending_paths.drain().collect();
+                    for path in &changes {
+                        // 檢查每個任務資料夾，找到對應的任務
+                        let mut handled = false;
+                        if let Some(cfg) = &self.config {
+                            for task in &cfg.tasks {
+                                if path.starts_with(&task.folder_path) {
+                                    if let Ok(rela_path) = path.strip_prefix(&task.folder_path) {
+                                        if path.exists() {
+                                            // 檔案存在：檢查 metadata 並更新資料庫
+                                            match path.metadata() {
+                                                Ok(meta) => {
+                                                    if let Ok(modified) = meta.modified() {
+                                                        if let Ok(d) = modified.duration_since(UNIX_EPOCH) {
+                                                            let file_modified: u64 = d.as_secs();
+                                                            let recorded: u64 = db.get(&task.folder_path, rela_path).unwrap_or(0);
+                                                            if file_modified != recorded {
+                                                                db.upsert(&task.folder_path, rela_path, file_modified);
+                                                                debug!("  檔案變更已更新: {} (mtime: {})", rela_path.display(), file_modified);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    warn!("  無法讀取檔案 metadata: {} - {}", path.display(), e);
+                                                }
+                                            }
+                                        } else {
+                                            // 檔案已不存在：從資料庫移除
+                                            db.remove(&task.folder_path, rela_path);
+                                            info!("  檔案已刪除，從資料庫移除: {}", rela_path.display());
+                                        }
+                                        handled = true;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        if !handled {
+                            debug!("  檔案變更（非任務路徑）: {}", path.display());
+                        }
+                    }
+                    // 儲存更新後的資料庫
+                    let _ = db.save_to_file(&temp_bin_path);
+                } else {
+                    warn!("無法載入資料庫，跳過檔案變更處理");
+                    self.pending_paths.clear();
                 }
+
                 self.last_process_watcher_path = now;
             }else {
                 next_wakeup = self.last_process_watcher_path + Duration::from_secs(3);
             }
         }
 
-        // 掃描
+        // 掃描（檢查使用者是否足夠閒置）
         if let Some(cfg) = &self.config {
-            // 判斷掃描狀態
+            // 掃描間隔（在閒置檢查前計算，因為需要這些值來排程喚醒）
             let s_interval: Duration = Duration::from_secs(
                 (cfg.app_setting.small_scan_interval as u64) * 60
             );
@@ -1222,29 +1519,54 @@ impl ApplicationHandler<FileEvent> for App {
                 (cfg.app_setting.complete_scan_interval as u64) * 60
             );
 
-            let next_s: Instant = self.last_small_scan + s_interval;
-            let next_c: Instant = self.last_complete_scan + c_interval;
+            // 閒置偵測：如果使用者近期有活動，推遲掃描
+            let idle_threshold: Duration = Duration::from_secs(
+                cfg.app_setting.idle_threshold_min_effective() * 60
+            );
+            // 使用 checked_duration_since 防止 Instant 非單調性問題
+            let idle_duration: Duration = now.checked_duration_since(self.last_user_activity)
+                .unwrap_or(Duration::ZERO);
+            let user_is_idle: bool = idle_duration >= idle_threshold;
 
-            let should_run_small: bool = now >= next_s;
-            let should_run_complete: bool = now >= next_c;
+            if !user_is_idle {
+                // 只在狀態變化時輸出一行日誌，避免 about_to_wait 每幀刷屏
+                if self.was_user_idle != Some(false) {
+                    info!("使用者活躍中，推遲排程掃描（閒置 {} 分鐘後執行）", cfg.app_setting.idle_threshold_min_effective());
+                }
+                self.was_user_idle = Some(false);
+                // 使用者仍在活動，推遲掃描，設為閒置後再檢查
+                let wake_at: Instant = self.last_user_activity + idle_threshold;
+                if wake_at < next_wakeup {
+                    next_wakeup = wake_at;
+                }
+            } else {
+                // 使用者已閒置，恢復掃描排程
+                if self.was_user_idle != Some(true) {
+                    info!("使用者已閒置，恢復正常掃描排程");
+                }
+                self.was_user_idle = Some(true);
+                // 判斷掃描狀態
+                let next_s: Instant = self.last_small_scan + s_interval;
+                let next_c: Instant = self.last_complete_scan + c_interval;
 
-            // 執行掃描
-            if should_run_complete && should_run_small {
-                /*
-                    兩者都需，只執行大掃描
-                 */
-                self.perform_scan(true);
-                self.last_complete_scan = now;
-                self.last_small_scan = now;
-            } else if should_run_complete {
-                self.perform_scan(true);
-                self.last_complete_scan = now;
-            } else if should_run_small {
-                self.perform_scan(false);
-                self.last_small_scan = now;
+                let should_run_small: bool = now >= next_s;
+                let should_run_complete: bool = now >= next_c;
+
+                // 執行掃描
+                if should_run_complete && should_run_small {
+                    self.perform_scan(true);
+                    self.last_complete_scan = now;
+                    self.last_small_scan = now;
+                } else if should_run_complete {
+                    self.perform_scan(true);
+                    self.last_complete_scan = now;
+                } else if should_run_small {
+                    self.perform_scan(false);
+                    self.last_small_scan = now;
+                }
             }
 
-            // 計算下一次喚醒時間，使用更精確的調度
+            // 計算下一次喚醒時間（無論是否閒置都需要）
             let next_s_time: Instant = self.last_small_scan + s_interval;
             let next_c_time: Instant = self.last_complete_scan + c_interval;
             next_wakeup = next_wakeup.min(next_s_time.min(next_c_time));
@@ -1255,20 +1577,55 @@ impl ApplicationHandler<FileEvent> for App {
             }
         }
 
+        // 🔔 檢查 UI 發送的信號檔案（簡易檔案級 IPC）
+        // 必須在排程喚醒之前處理，才能收到信號後立即觸發掃描
+        if let Ok(signal_path) = get_file_path(IPC_SIGNAL_PATH) {
+            if signal_path.exists() {
+                if let Ok(signal_content) = fs::read_to_string(&signal_path) {
+                    let _ = fs::remove_file(&signal_path); // 刪除防止重複處理
+                    if signal_content.trim() == "scan_now" {
+                        info!("收到 UI 的立即掃描請求，執行完整掃描");
+                        self.perform_scan(true);
+                        self.last_complete_scan = Instant::now();
+                        self.last_small_scan = Instant::now();
+                    } else {
+                        warn!("未知的信號命令: {}", signal_content.trim());
+                    }
+                }
+            }
+        }
+
         // 排程下次喚醒
         event_loop.set_control_flow(ControlFlow::WaitUntil(next_wakeup));
 
-        // 處理選單事件
+        // 處理選單事件（同時更新使用者活動時間）
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             debug!("選單點擊事件: {:?}", event);
+            self.last_user_activity = Instant::now();
 
             if event.id == self.quit_item.id() {
                 info!("用戶請求退出程序");
                 event_loop.exit();
             } else if event.id == self.open_config.id() {
-                info!("打開配置文件");
+                info!("用文字編輯器開啟 config.toml");
                 if let Err(e) = open_or_create_toml(CONFIG_TOML_PATH) {
                     error!("無法開啟配置文件: {}", e);
+                }
+            } else if event.id == self.open_ui.id() {
+                info!("啟動 UI 設定面板");
+                let ui_path: PathBuf = get_file_path("onee_sweeper_ui.exe").unwrap_or_else(|_| PathBuf::from("onee_sweeper_ui.exe"));
+                match std::process::Command::new(&ui_path).spawn() {
+                    Ok(_) => info!("UI 設定面板已啟動"),
+                    Err(e) => {
+                        error!("無法啟動 UI: {}（路徑: {}）", e, ui_path.display());
+                        Notification::new()
+                            .appname("ONEE SWEEPER")
+                            .summary("啟動失敗")
+                            .body(&format!("無法啟動 UI 設定面板: {}", e))
+                            .timeout(5000)
+                            .show()
+                            .unwrap();
+                    }
                 }
             } else if event.id == self.open_log.id() {
                 info!("打開日誌文件");
@@ -1346,7 +1703,14 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
-    info!("程序啟動");
+    info!("daemon 啟動 (PID: {})", std::process::id());
+
+    // 寫入 PID 檔案，讓 UI 判斷 daemon 是否在執行
+    if let Ok(pid_path) = get_file_path(DAEMON_PID_PATH) {
+        if let Err(e) = fs::write(&pid_path, std::process::id().to_string()) {
+            warn!("無法寫入 PID 檔案: {}", e);
+        }
+    }
 
     let event_loop: EventLoop<FileEvent> = match EventLoop::with_user_event().build() {
         Ok(el) => el,
@@ -1357,7 +1721,14 @@ fn main() -> io::Result<()> {
     }; // 創建事件迴圈
 
     let proxy: EventLoopProxy<FileEvent> = event_loop.create_proxy();
-    let watcher_cmd: crossbeam_channel::Sender<WatchCommand> = start_watcher(proxy.clone());
+    let config_path: PathBuf = match get_file_path(CONFIG_TOML_PATH) {
+        Ok(p) => p,
+        Err(_) => {
+            warn!("無法解析設定檔路徑");
+            PathBuf::from(CONFIG_TOML_PATH)
+        }
+    };
+    let watcher_cmd: crossbeam_channel::Sender<WatchCommand> = start_watcher(proxy.clone(), Some(config_path.clone()));
 
     // 讀取配置並清理舊日誌
     let config: Option<Config> = read_config(); // 讀取配置文件
@@ -1382,20 +1753,42 @@ fn main() -> io::Result<()> {
 
     // 初始化應用狀態
     let now_instant: Instant = Instant::now();
+
+    // 根據 scan_on_startup 決定初始掃描時間
+    let scan_on_startup: bool = config
+        .as_ref()
+        .map(|c| c.app_setting.scan_on_startup_effective())
+        .unwrap_or(true);
+
+    let initial_scan_time: Instant = if scan_on_startup {
+        // 使用 checked_sub 防止 Instant 內部表示過小導致溢位 panic
+        // 若溢位則降級為現在時間（跳過啟動掃描，等下次排程）
+        now_instant.checked_sub(Duration::from_secs(86400))
+            .unwrap_or_else(|| {
+                warn!("Instant 內部值過小，跳過啟動掃描（下次排程觸發）");
+                now_instant
+            })
+    } else {
+        now_instant
+    };
+
     let mut app: App = App {
         proxy: proxy.clone(),
         watcher_cmd: watcher_cmd,
         pending_paths: HashSet::new(),
         last_process_watcher_path: Instant::now(),
         tray_icon: None,
-        open_config: MenuItem::new("開啟配置", true, None),
+        open_config: MenuItem::new("開啟配置 (文字編輯器)", true, None),
+        open_ui: MenuItem::new("開啟設定面板 (UI)", true, None),
         open_log: MenuItem::new("查看日誌", true, None),
         refresh_config: MenuItem::new("刷新配置", true, None),
         creat_startup_link: MenuItem::new("創建開機啟動", true, None),
         remove_startup_link: MenuItem::new("移除開機啟動", true, None),
         quit_item: MenuItem::new("退出", true, None),
-        last_complete_scan: now_instant,
-        last_small_scan: now_instant,
+        last_complete_scan: initial_scan_time,
+        last_small_scan: initial_scan_time,
+        last_user_activity: Instant::now(),
+        was_user_idle: None, // 第一輪尚未判定，避免日誌刷屏
         config,
     };
 

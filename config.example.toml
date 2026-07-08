@@ -21,6 +21,24 @@ test_mode = true
 # 超過此大小會自動備份並清空
 log_max_size_mb = 10
 
+# === 進階設定（可選）===
+
+# 使用者閒置 N 分鐘後才執行掃描（避免影響操作）
+# 預設 5 分鐘
+idle_threshold_min = 5
+
+# 記憶體上限（MB），超過則暫停掃描
+# 預設 50 MB
+max_memory_mb = 50
+
+# 通知詳細程度："none" | "summary" | "verbose"
+# 預設 "summary"
+notification_level = "summary"
+
+# 啟動時立刻掃描一次
+# 預設 true
+scan_on_startup = true
+
 # ============================================================
 # 任務配置
 # 可以配置多個任務，每個任務清理一個資料夾
@@ -38,6 +56,34 @@ target = [
     "*.temp",     # 所有 .temp 文件
     "Temp_*",     # 所有以 Temp_ 開頭的文件/資料夾
 ]
+
+# 排除模式（可選）：永遠不刪除匹配的檔案
+exclude = [
+    "*.important",
+    "*.keep",
+]
+
+# 檔案大小過濾（可選）
+# min_size_bytes = 1024      # 小於 1KB 不刪
+# max_size_bytes = 1073741824  # 大於 1GB 不刪
+
+# 是否跟隨符號連結（可選，預設 false）
+# follow_symlinks = false
+
+# 首次發現後至少 N 天才能刪除（可選）
+# 防止刪除剛下載的檔案
+# min_age_before_delete = 1
+
+# 是否啟用此任務（可選，預設 true）
+# enabled = true
+
+# 掃描模式："both" | "small_only" | "complete_only"（可選，預設 "both"）
+# scan_mode = "both"
+
+# 時間窗排程（可選）：僅在此時間範圍內掃描
+# [tasks.schedule_window]
+# start = "02:00"
+# end = "06:00"
 
 # 時間閾值：超過此時間的文件將被刪除
 [tasks.threshold]

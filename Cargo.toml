@@ -1,36 +1,21 @@
-[package]
-name = "onee_sweeper"
-version = "1.1.0" # 根本性大本版.功能性小版本.bug修正等小版本
+# ============================================================
+# ONEE SWEEPER v3.0 — 雙執行檔架構
+#
+# 工作區包含兩個獨立執行檔：
+#   - daemon/   後台服務（常駐系統托盤，檔案監控、掃描、清理）
+#   - ui/       UI 設定工具（開啟設定 → 關閉，不佔用系統資源）
+# ============================================================
+[workspace]
+members = ["daemon", "ui"]
+resolver = "2"
+
+[workspace.package]
+version = "3.0.0"
 edition = "2021"
 
-[dependencies]
-tray-icon = "0.22.0"
-winit = "0.30.13"
-image = "0.25.10"
-
-
-mslnk = "0.1.8" # 自啟動
-# 日誌
-log = { version = "0.4", features = ["release_max_level_info"] }
-simplelog = "0.12"
-# toml
-serde = { version = "1.0.228", features = ["derive"] }
-toml = "0.9.8"
-globset = "0.4.18" # 路徑
-# 二進制讀寫
-rkyv = { version = "0.8", features = ["alloc", "bytecheck"] }
-bytemuck = { version = "1.14", features = ["derive"] }
-trash = "5.2" # 垃圾桶
-edit = "0.1.5" # 文字編輯器
-notify-rust = "4.14.0" # 通知
-notify = "8.2.0" # 檔案監控
-crossbeam-channel = "0.5.15" # 平衡速度與大小
-
-
-
 [profile.release]
-opt-level = 3
-lto = "thin"
+opt-level = "z"
+lto = "fat"
 codegen-units = 1
-panic = "unwind"
+panic = "abort"
 strip = true
