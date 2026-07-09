@@ -59,11 +59,21 @@ impl ScanFolderData {
         }
     }
 
-    /// ### 插入路徑與最後修改時間。
-    /// 
-    /// 如果存在會取代。
-    pub fn upsert(&mut self, relative_path: &Path, last_modified: u64) {
-        self.entries.insert(path_to_bytes(relative_path), last_modified);
+    /// ### 插入或更新路徑的最後修改時間（唯增規則）。
+    ///
+    /// - 路徑不存在：寫入 `last_modified`。
+    /// - 路徑存在且 `last_modified > 已記錄`：更新為 `last_modified`。
+    /// - 路徑存在且 `last_modified ≤ 已記錄`：不修改。
+    ///
+    /// 回傳最終記錄值。
+    pub fn upsert(&mut self, relative_path: &Path, last_modified: u64) -> u64 {
+        let key: Vec<u8> = path_to_bytes(relative_path);
+        let entry = self.entries.entry(key);
+        *entry.and_modify(|v| {
+            if last_modified > *v {
+                *v = last_modified;
+            }
+        }).or_insert(last_modified)
     }
 
     /// ### 取得路徑的最後修改時間。
@@ -192,12 +202,12 @@ impl ScanDatabase {
 
     // ── 項目層級操作 ─────────────────────────────────────────────────────────
 
-    /// ### 在資料夾插入路徑
-    /// 
+    /// ### 在資料夾插入或更新路徑（唯增規則）。
+    ///
     /// 如果資料夾不存在，會創建。
-    /// 如果路徑存在，會取代。
-    pub fn upsert(&mut self, folder_path: &Path, relative_path: &Path, last_modified: u64) {
-        self.get_or_create_folder(folder_path).upsert(relative_path, last_modified);
+    /// 回傳最終記錄值。
+    pub fn upsert(&mut self, folder_path: &Path, relative_path: &Path, last_modified: u64) -> u64 {
+        self.get_or_create_folder(folder_path).upsert(relative_path, last_modified)
     }
 
     /// ### 取得路徑的最後修改時間

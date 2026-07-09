@@ -44,6 +44,8 @@ const TEMP_BIN_PATH: &str = "temp.bin";
 const IPC_SIGNAL_PATH: &str = "command.signal";
 /// daemon 啟動時寫入 PID，讓 UI 判斷 daemon 是否在執行
 const DAEMON_PID_PATH: &str = "daemon.pid";
+/// 批次刪除大小：累積到此數量即執行一次刪除
+const BATCH_SIZE: usize = 50;
 
 // 檔案系統監控事件
 enum FileEvent {
@@ -241,45 +243,6 @@ fn load_icon(rgba_bytes: &[u8]) -> Result<Icon, Box<dyn std::error::Error>> {
     Ok(Icon::from_rgba(rgba, width, height)?)
 }
 
-/// ### 打開日誌文件
-///
-/// 使用系統預設編輯器打開日誌文件
-fn open_log_file() -> Result<(), Box<dyn std::error::Error>> {
-    let exe_path = env::current_exe()?;
-    let exe_dir = exe_path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "無法取得執行檔目錄"))?;
-    let log_path = exe_dir.join(LOG_FILE_NAME);
-
-    if log_path.exists() {
-        edit::edit_file(log_path)?;
-    } else {
-        warn!("找不到日誌檔案");
-    }
-    Ok(())
-}
-
-/// ### 打開配置文件
-///
-/// 打開 toml 配置文件，如果不存在就創建一個。
-///
-/// - path 指定路徑
-fn open_or_create_toml(path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let path: &Path = &get_file_path(path)?;
-
-    // 如果檔案不存在，先創建它
-    if !path.exists() {
-        info!("檔案不存在，正在創建預設 TOML...");
-        File::create(path)?;
-    }
-
-    // 使用系統預設編輯器開啟
-    info!("正在開啟編輯器: {}", path.display());
-    edit::edit_file(path)?;
-
-    Ok(())
-}
-
 /// ### 載入配置文件
 ///
 /// 嘗試讀取配置文件,如果不存在返回None。
@@ -406,6 +369,34 @@ fn get_current_memory_mb() -> u64 {
 #[cfg(not(windows))]
 fn get_current_memory_mb() -> u64 { 0 }
 
+/// ### 取得目前 Unix 時間（秒）
+fn compute_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// ### 從模式字串列表建立 GlobSet
+fn build_glob_set(patterns: Option<&Vec<String>>) -> io::Result<Option<globset::GlobSet>> {
+    match patterns {
+        Some(patterns) if !patterns.is_empty() => {
+            let mut builder = GlobSetBuilder::new();
+            for p in patterns {
+                builder.add(
+                    Glob::new(p)
+                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+                );
+            }
+            builder
+                .build()
+                .map(Some)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// ### 應用程序結構
 /// ### 應用程式主結構
 ///
@@ -419,11 +410,8 @@ struct App {
     last_process_watcher_path: Instant, // 最後一次處理監控路徑的時間戳
 
     tray_icon: Option<TrayIcon>, // 圖標
-    open_config: MenuItem, // 打開配置
     /// 開啟 UI 設定面板（啟動 onee_sweeper_ui.exe）
     open_ui: MenuItem,
-    open_log: MenuItem, // 打開日誌
-    refresh_config: MenuItem, // 刷新配置
     creat_startup_link: MenuItem, // 創建開機啟動連結
     remove_startup_link: MenuItem, // 移除開機啟動連結
     quit_item: MenuItem, // 退出選項
@@ -570,6 +558,21 @@ impl App {
 
                 info!("檢查資料夾: {}", task.folder_path.to_string_lossy());
 
+                // 檢查 scan_mode
+                if let Some(ref mode) = task.scan_mode {
+                    match mode.as_str() {
+                        "small_only" if is_complete => {
+                            debug!("  任務設為 small_only，跳過完整掃描");
+                            continue;
+                        }
+                        "complete_only" if !is_complete => {
+                            debug!("  任務設為 complete_only，跳過快速掃描");
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+
                 if !task.folder_path.exists() {
                     warn!("  路徑不存在，跳過任務");
                     task_errors += 1;
@@ -600,6 +603,7 @@ impl App {
                         &mut db,
                         &task.folder_path, // 絕對路徑
                         task.target.as_ref(),
+                        task.exclude.as_ref(),
                         threshold_secs,
                         task.really_delete.unwrap_or(false),
                         cfg.app_setting.test_mode.unwrap_or(false),
@@ -611,6 +615,7 @@ impl App {
                         &mut db,
                         &task.folder_path,
                         task.target.as_ref(),
+                        task.exclude.as_ref(),
                         threshold_secs,
                         task.really_delete.unwrap_or(false),
                         cfg.app_setting.test_mode.unwrap_or(false)
@@ -664,6 +669,16 @@ impl App {
         }
     }
 
+    /// ### 檢查路徑是否匹配排除規則
+    ///
+    /// 如果路徑與任何 exclude glob 模式匹配，回傳 true。
+    fn is_excluded(rela_path: &Path, exclude_set: &Option<globset::GlobSet>) -> bool {
+        match exclude_set {
+            Some(set) => set.is_match(rela_path),
+            None => false,
+        }
+    }
+
     /// ### 大掃描：真實掃描資料夾
     ///
     /// 執行大掃描，會實際掃盤。
@@ -679,6 +694,7 @@ impl App {
         db: &mut scanner::ScanDatabase,
         folder_path: &Path,
         target: Option<&Vec<String>>,
+        exclude: Option<&Vec<String>>,
         threshold_secs: u64,
         really_delete: bool,
         test_mode: bool,
@@ -712,43 +728,25 @@ impl App {
             }
         }
 
-        let now: u64 = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(d) => d.as_secs(),
-            Err(e) => {
-                error!("系統時間錯誤: {}", e);
-                return Err(io::Error::new(io::ErrorKind::Other, "系統時間錯誤"));
-            }
-        };
+        let now: u64 = compute_now_secs();
+        if now == 0 {
+            return Err(io::Error::new(io::ErrorKind::Other, "系統時間錯誤"));
+        }
 
-        let mut to_delete: Vec<PathBuf> = Vec::with_capacity(50); // 分批處理，初始容量 50
+        let mut to_delete: Vec<PathBuf> = Vec::with_capacity(50);
 
         // 創建匹配器
-        let set: Option<globset::GlobSet> = if let Some(some_target) = target {
-            let mut builder: GlobSetBuilder = GlobSetBuilder::new();
-            for p in some_target {
-                builder.add(
-                    Glob::new(&p).map_err(|e: globset::Error|
-                        io::Error::new(io::ErrorKind::Other, e)
-                    )?
-                );
-            }
-            Some(
-                builder
-                    .build()
-                    .map_err(|e: globset::Error| io::Error::new(io::ErrorKind::Other, e))?
-            )
-        } else {
-            None
-        };
+        let set: Option<globset::GlobSet> = build_glob_set(target)?;
 
-        // 分批掃描與刪除：每累積 BATCH_SIZE 個待刪除路徑就處理一次
-        const BATCH_SIZE: usize = 50;
+        // 創建排除匹配器
+        let exclude_set: Option<globset::GlobSet> = build_glob_set(exclude)?;
 
         // 遞迴掃描資料夾（分批處理）
             self.scan_directory_recursive_batched(
                 folder_path,
                 folder_path,
                 &set,
+                &exclude_set,
                 false,
                 threshold_secs,
                 now,
@@ -772,19 +770,16 @@ impl App {
 
     /// ### 遞迴掃描目錄（分批處理版）
     ///
-    /// 與 scan_directory_recursive 功能相同，但在 to_delete 達到 batch_size 時
-    /// 自動執行刪除並清空緩衝區，降低尖峰記憶體使用。
-/// ### 遞迴掃描目錄（分批處理版）
-///
-/// 與傳統遞迴掃描功能相同，但在 to_delete 達到 batch_size 時自動執行批次刪除，
-/// 降低尖峰記憶體使用量。每批處理 50 個刪除目標。
-///
-/// - follow_symlinks: 是否跟隨符號連結（來自任務設定）
+    /// 與傳統遞迴掃描功能相同，但在 to_delete 達到 batch_size 時自動執行批次刪除，
+    /// 降低尖峰記憶體使用量。每批處理 BATCH_SIZE 個刪除目標。
+    ///
+    /// - follow_symlinks: 是否跟隨符號連結（來自任務設定）
     fn scan_directory_recursive_batched(
         &self,
         path: &Path,
         root: &Path,
         target: &Option<globset::GlobSet>,
+        exclude_set: &Option<globset::GlobSet>,
         in_target_folder: bool,
         threshold_secs: u64,
         now: u64,
@@ -835,11 +830,18 @@ impl App {
                     continue;
                 }
 
+                // 排除檢查
+                if Self::is_excluded(&rela_path, exclude_set) {
+                    debug!("  排除資料夾: {}", rela_path.display());
+                    continue;
+                }
+
                 // 遞迴子目錄（分批）
                 self.scan_directory_recursive_batched(
                     &entry_path,
                     root,
                     target,
+                    exclude_set,
                     is_match,
                     threshold_secs,
                     now,
@@ -855,23 +857,15 @@ impl App {
                     continue;
                 }
 
-                let recorded_time: u64 = if let Some(recorded) = db.get(root, &rela_path) {
-                    recorded
-                } else {
-                    db.upsert(root, &rela_path, now);
-                    now
+                let recorded_time = match db.get(root, &rela_path) {
+                    Some(v) => v,
+                    None => db.upsert(root, &rela_path, now),
                 };
 
-                if recorded_time > max_child_modified {
-                    max_child_modified = recorded_time;
-                }
+                max_child_modified = max_child_modified.max(recorded_time);
 
-                if let Some(age) = now.checked_sub(recorded_time) {
-                    if age >= threshold_secs {
-                        to_delete.push(entry_path);
-                    }
-                } else {
-                    warn!("  資料夾時間計算溢出，跳過: {}", rela_path.display());
+                if now.saturating_sub(recorded_time) >= threshold_secs {
+                    to_delete.push(entry_path);
                 }
 
                 continue;
@@ -881,38 +875,27 @@ impl App {
                 continue;
             }
 
+            // 排除檢查
+            if Self::is_excluded(&rela_path, exclude_set) {
+                debug!("  排除檔案: {}", rela_path.display());
+                continue;
+            }
+
             // 處理匹配的文件
             if let Ok(modified) = metadata.modified() {
                 let file_modified: u64 = match modified.duration_since(UNIX_EPOCH) {
                     Ok(d) => d.as_secs(),
-                    Err(_) => {
-                        warn!("  檔案時間異常，跳過: {}", rela_path.display());
-                        continue;
-                    }
+                    Err(_) => continue,
                 };
 
-                let recorded_time: u64 = if let Some(recorded) = db.get(root, &rela_path) {
-                    if file_modified > recorded {
-                        db.upsert(root, &rela_path, file_modified);
-                        file_modified
-                    } else {
-                        recorded
-                    }
-                } else {
-                    db.upsert(root, &rela_path, now);
-                    now
-                };
+                // 第一筆記錄使用 now（寬限期），已有記錄則 upsert 只允許增加
+                let value = if db.get(root, &rela_path).is_none() { now } else { file_modified };
+                let recorded_time = db.upsert(root, &rela_path, value);
 
-                if recorded_time > max_child_modified {
-                    max_child_modified = recorded_time;
-                }
+                max_child_modified = max_child_modified.max(recorded_time);
 
-                if let Some(age) = now.checked_sub(recorded_time) {
-                    if age >= threshold_secs {
-                        to_delete.push(entry_path);
-                    }
-                } else {
-                    warn!("  時間計算溢出，跳過: {}", rela_path.display());
+                if now.saturating_sub(recorded_time) >= threshold_secs {
+                    to_delete.push(entry_path);
                 }
             }
 
@@ -934,13 +917,7 @@ impl App {
                 )?;
 
             if rela_path.as_os_str() != "" {
-                if let Some(current_recorded) = db.get(root, rela_path) {
-                    if max_child_modified > current_recorded {
-                        db.upsert(root, rela_path, max_child_modified);
-                    }
-                } else {
-                    db.upsert(root, rela_path, max_child_modified);
-                }
+                db.upsert(root, rela_path, max_child_modified);
             }
         }
 
@@ -962,38 +939,24 @@ impl App {
         db: &mut scanner::ScanDatabase,
         folder_path: &Path,
         target: Option<&Vec<String>>,
+        exclude: Option<&Vec<String>>,
         threshold_secs: u64,
         really_delete: bool,
         test_mode: bool
     ) -> io::Result<()> {
-        let now: u64 = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(d) => d.as_secs(),
-            Err(e) => {
-                error!("系統時間錯誤: {}", e);
-                return Err(io::Error::new(io::ErrorKind::Other, "系統時間錯誤"));
-            }
-        };
+        let now: u64 = compute_now_secs();
+        if now == 0 {
+            error!("系統時間錯誤");
+            return Err(io::Error::new(io::ErrorKind::Other, "系統時間錯誤"));
+        }
 
         let mut to_delete: Vec<PathBuf> = Vec::new(); // 絕對路徑
 
         // 創建匹配器
-        let set: Option<globset::GlobSet> = if let Some(some_target) = target {
-            let mut builder: GlobSetBuilder = GlobSetBuilder::new();
-            for p in some_target {
-                builder.add(
-                    Glob::new(&p).map_err(|e: globset::Error|
-                        io::Error::new(io::ErrorKind::Other, e)
-                    )?
-                );
-            }
-            Some(
-                builder
-                    .build()
-                    .map_err(|e: globset::Error| io::Error::new(io::ErrorKind::Other, e))?
-            )
-        } else {
-            None
-        };
+        let set: Option<globset::GlobSet> = build_glob_set(target)?;
+
+        // 創建排除匹配器
+        let exclude_set: Option<globset::GlobSet> = build_glob_set(exclude)?;
 
         // 取得所有目標
         let mut target_path: Vec<(usize, PathBuf)> = db
@@ -1040,6 +1003,11 @@ impl App {
                 }
             }
 
+            // 排除檢查
+            if Self::is_excluded(&rela_path, &exclude_set) {
+                continue;
+            }
+
             // 讀取閥值，讀不到的話，跳過(不會刪除)
             if let Some(recorded_time) = db.get(folder_path, &rela_path) {
                 // 使用 checked_sub 防止溢出
@@ -1069,28 +1037,14 @@ impl App {
                             }
                         }; // 取得實際最後修改時間
                         if file_modified > recorded_time {
-                            /*
-                                等於最正常，
-                                小於 => 必定過期，可能是下載等遺留舊時間，
-                                大於才代表更新了，需要重新檢查
-                             */
-
-                            // 更新資料庫
-                            db.upsert(folder_path, &rela_path, file_modified); // 更新自己
+                            // 檔案已更新：upsert 內建唯增規則，更新後向上傳遞
+                            db.upsert(folder_path, &rela_path, file_modified);
                             self.update_parent_folders_in_db(
-                                &rela_path,
-                                folder_path,
-                                file_modified,
-                                db
-                            ); // 更新父資料夾
+                                &rela_path, folder_path, file_modified, db
+                            );
 
                             // 再度判斷是否達到閥值，未達到 => 跳過
-                            if let Some(age) = now.checked_sub(file_modified) {
-                                if age < threshold_secs {
-                                    continue;
-                                }
-                            } else {
-                                warn!("  時間計算溢出，跳過: {}", rela_path.display());
+                            if now.saturating_sub(file_modified) < threshold_secs {
                                 continue;
                             }
                         }
@@ -1141,19 +1095,14 @@ impl App {
                 break;
             }
 
-            // 檢查父資料夾記錄
+            // 已有記錄且較新 → 不需要繼續向上傳遞
             if let Some(parent_recorded) = db.get(root, parent) {
-                if modified_time > parent_recorded {
-                    // 更新資料
-                    db.upsert(root, parent, modified_time);
-                } else {
-                    // 如果父資料夾不用更新，不需要繼續向上
+                if modified_time <= parent_recorded {
                     break;
                 }
-            } else {
-                // 父資料夾沒有記錄，創建記錄以保持一致性
-                db.upsert(root, parent, modified_time);
             }
+            // upsert 內建唯增規則，不存在時插入
+            db.upsert(root, parent, modified_time);
 
             current = parent;
         }
@@ -1372,10 +1321,7 @@ impl ApplicationHandler<FileEvent> for App {
             if
                 let Err(e) = tray_menu.append_items(
                     &[
-                        &self.open_config,
                         &self.open_ui,
-                        &self.open_log,
-                        &self.refresh_config,
                         &PredefinedMenuItem::separator(),
                         &self.creat_startup_link,
                         &self.remove_startup_link,
@@ -1468,7 +1414,7 @@ impl ApplicationHandler<FileEvent> for App {
                                                         if let Ok(d) = modified.duration_since(UNIX_EPOCH) {
                                                             let file_modified: u64 = d.as_secs();
                                                             let recorded: u64 = db.get(&task.folder_path, rela_path).unwrap_or(0);
-                                                            if file_modified != recorded {
+                                                            if file_modified > recorded {
                                                                 db.upsert(&task.folder_path, rela_path, file_modified);
                                                                 debug!("  檔案變更已更新: {} (mtime: {})", rela_path.display(), file_modified);
                                                             }
@@ -1604,11 +1550,6 @@ impl ApplicationHandler<FileEvent> for App {
             if event.id == self.quit_item.id() {
                 info!("用戶請求退出程序");
                 event_loop.exit();
-            } else if event.id == self.open_config.id() {
-                info!("用文字編輯器開啟 config.toml");
-                if let Err(e) = open_or_create_toml(CONFIG_TOML_PATH) {
-                    error!("無法開啟配置文件: {}", e);
-                }
             } else if event.id == self.open_ui.id() {
                 info!("啟動 UI 設定面板");
                 let ui_path: PathBuf = get_file_path("onee_sweeper_ui.exe").unwrap_or_else(|_| PathBuf::from("onee_sweeper_ui.exe"));
@@ -1625,14 +1566,6 @@ impl ApplicationHandler<FileEvent> for App {
                             .unwrap();
                     }
                 }
-            } else if event.id == self.open_log.id() {
-                info!("打開日誌文件");
-                if let Err(e) = open_log_file() {
-                    error!("無法打開日誌文件: {}", e);
-                }
-            } else if event.id == self.refresh_config.id() {
-                info!("刷新配置");
-                self.reload_config();
             } else if event.id == self.creat_startup_link.id() {
                 match create_startup_link() {
                     Ok(()) => {
@@ -1776,10 +1709,7 @@ fn main() -> io::Result<()> {
         pending_paths: HashSet::new(),
         last_process_watcher_path: Instant::now(),
         tray_icon: None,
-        open_config: MenuItem::new("開啟配置 (文字編輯器)", true, None),
         open_ui: MenuItem::new("開啟設定面板 (UI)", true, None),
-        open_log: MenuItem::new("查看日誌", true, None),
-        refresh_config: MenuItem::new("刷新配置", true, None),
         creat_startup_link: MenuItem::new("創建開機啟動", true, None),
         remove_startup_link: MenuItem::new("移除開機啟動", true, None),
         quit_item: MenuItem::new("退出", true, None),
