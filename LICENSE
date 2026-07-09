@@ -672,3 +672,65 @@ may consider it more useful to permit linking proprietary applications with
 the library.  If this is what you want to do, use the GNU Lesser General
 Public License instead of this License.  But first, please read
 <https://www.gnu.org/licenses/why-not-lgpl.html>.
+
+
+============================================================================
+第三方程式元件授權聲明 · Third-Party Component Notices
+============================================================================
+
+本軟體（ONEE SWEEPER）在分發時包含以下第三方元件，其各自授權條款如下。
+
+This product bundles third-party components under separate licenses.
+
+---------------------------------------------------------------------------
+1. jf open huninn 字型 (粉圓體)
+---------------------------------------------------------------------------
+
+  檔案: assets/jf-openhuninn-2.1.ttf  (亦隨二進位發行版一同分發)
+  授權: SIL Open Font License v1.1
+  Copyright © 2020-2024 justfont Co., Ltd.
+  Reserved Font Names: 'open huninn', 'huninn'
+
+  本字型之中文字元部分衍生自 Kosugi Maru，
+  Copyright (c) 2010 MOTOYA CO.,LTD.，授權於 Apache License 2.0。
+  拉丁字母與希伯來字母部分衍生自 Varela Round，
+  Copyright (c) 2011-2016 The Varela Round Project Authors，
+  授權於 SIL Open Font License v1.1。
+
+  SIL Open Font License 全文請見: http://scripts.sil.org/OFL
+
+---------------------------------------------------------------------------
+2. Kosugi Maru (中文字元來源)
+---------------------------------------------------------------------------
+
+  授權: Apache License, Version 2.0
+  Copyright (c) 2010 MOTOYA CO.,LTD.
+  http://www.apache.org/licenses/LICENSE-2.0
+
+---------------------------------------------------------------------------
+3. Varela Round (拉丁／希伯來字母來源)
+---------------------------------------------------------------------------
+
+  授權: SIL Open Font License v1.1
+  Copyright (c) 2011-2016 The Varela Round Project Authors
+  https://github.com/alefalefalef/Varela-Round-Hebrew/
+
+---------------------------------------------------------------------------
+4. Rust 生態系相依函式庫
+---------------------------------------------------------------------------
+
+  本軟體以 Rust 程式語言編寫，使用了下列主要第三方 crate。
+  每個 crate 均依其各自的開源授權條款使用（主要為 MIT / Apache-2.0），
+  完整清單與授權聲明請參閱 Cargo.toml 及個別 crate 之文件。
+
+  - tray-icon (MIT)
+  - winit (Apache-2.0 / MIT)
+  - image (MIT)
+  - eframe / egui (MIT / Apache-2.0)
+  - serde / toml (Apache-2.0 / MIT)
+  - rkyv (MIT)
+  - notify / notify-rust (CC0-1.0 / MIT)
+  - trash (MIT)
+  - mimalloc (MIT)
+
+  Rust 生態系之相依函式庫完整清單請執行: cargo license

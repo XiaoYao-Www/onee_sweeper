@@ -1,136 +1,201 @@
 # ONEE SWEEPER
 
-一個智能的文件清理工具，自動清理過期的文件和資料夾，支持靈活的配置和安全的刪除機制。
+一個智能的文件清理工具，自動掃描並清理過期檔案。採用 **daemon + UI 雙執行檔架構**，背景服務常駐系統托盤，圖形介面按需開啟。
+
+---
 
 ## 功能特點
 
-- 🔄 **智能掃描**：支持快速掃描和完整掃描兩種模式
-- 🎯 **精確匹配**：使用 glob 模式匹配目標文件和資料夾
-- 🗑️ **安全刪除**：支持移入垃圾桶或徹底刪除
-- 📊 **數據持久化**：使用高效的二進制數據庫記錄文件狀態
-- 🛡️ **多重保護**：防止誤刪任務根目錄和非目標文件
-- 🔧 **熱重載**：支持運行時刷新配置
-- 📝 **詳細日誌**：完整的操作記錄和錯誤追蹤
-- 🖥️ **系統托盤**：最小化到系統托盤，不干擾工作
+- 🔄 **雙模式掃描**：快速掃描（增量）與完整掃描（全量遍歷）
+- 🎯 **精確匹配**：使用 glob 模式精準指定目標檔案
+- 🗑️ **安全刪除**：可選移入垃圾桶或徹底刪除
+- 📊 **高效資料庫**：使用 `rkyv` 二進位序列化，低開銷記錄檔案狀態
+- 🛡️ **多重保護**：防止誤刪任務根目錄，支援排除模式
+- ⏰ **排程時間窗**：可限制僅在特定時段內掃描
+- 🖥️ **圖形化管理**：egui 所見即所得設定面板，無需手寫 TOML
+- 🔔 **系統通知**：狀態變更與掃描結果即時桌面通知
+- 📝 **完整日誌**：掃描記錄與刪除審計雙日誌
+
+---
+
+## 系統架構
+
+```
+┌─────────────────────┐    檔案級 IPC      ┌─────────────────────┐
+│  onee_sweeper_daemon │ ◄─── signal ─────► │  onee_sweeper_ui    │
+│  (背景常駐程式)       │   config.toml      │  (圖形設定面板)      │
+│                     │ ◄── 共用設定 ────► │                     │
+│  ・系統托盤          │                    │  ・egui 視窗         │
+│  ・檔案監控          │                    │  ・表單編輯          │
+│  ・排程掃描          │                    │  ・任務管理          │
+│  ・閒置偵測          │                    │  ・日誌檢視          │
+│  ・自動刪除          │                    │  ・操作面板          │
+└─────────────────────┘                    └─────────────────────┘
+```
+
+兩個執行檔**必須放在同一目錄**，透過共用 `config.toml` 與信號檔案（`command.signal`、`config_reload.signal`）通訊。
+
+---
 
 ## 系統要求
 
-- Windows 10 或更高版本
-- 約 5MB 磁盤空間
+- Windows 10 或更高版本（64 位元）
+- 約 10 MB 磁碟空間（含字型）
+
+---
 
 ## 安裝
 
-### 從源碼編譯
+### 下載預編譯版本
+
+從 [Releases](https://github.com/ONEESWEEPER/onee_sweeper/releases) 頁面下載最新 `.zip`，解壓縮後：
+- `onee_sweeper_daemon.exe` — 背景服務（常駐）
+- `onee_sweeper_ui.exe` — 設定面板（按需開啟）
+- `fonts/jf-openhuninn-2.1.ttf` — 字型（UI 使用）
+
+### 從原始碼編譯
 
 ```bash
-# 克隆倉庫
 git clone <repository-url>
 cd onee_sweeper
 
-# 編譯發布版本
+# 編譯發布版本（workspace 自動編譯 daemon + UI + core）
 cargo build --release
 
-# 可執行文件位於 target/release/onee_sweeper.exe
+# 執行檔位於:
+#   target/release/onee_sweeper_daemon.exe
+#   target/release/onee_sweeper_ui.exe
 ```
 
-### 直接使用
-
-1. 下載最新的 `onee_sweeper.exe`
-2. 放置到任意目錄
-3. 雙擊運行
+---
 
 ## 快速開始
 
-### 1. 首次運行
+### 1. 啟動 daemon
 
-首次運行程序時，會在系統托盤顯示一個圖標（停止狀態）。
+雙擊 `onee_sweeper_daemon.exe`，系統托盤會出現圖示：
+- 🔴 **紅色圖示**：配置不存在或不合法，程式暫停
+- 🟢 **黃色圖示**：配置正確，正常運行
 
-### 2. 配置文件
+首次啟動會彈出「配置錯誤」通知，這是正常的——因為還沒有設定。
 
-右鍵點擊托盤圖標，選擇「開啟配置」，會自動創建並打開 `config.toml` 文件。
+### 2. 開啟設定面板
 
-### 3. 基本配置示例
+右鍵托盤圖示 → **「開啟設定面板 (UI)」**，或直接執行 `onee_sweeper_ui.exe`。
+
+### 3. 填寫設定
+
+UI 分為四個分頁：
+
+| 分頁 | 功能 |
+|------|------|
+| **設定編輯** | 編輯應用設定與任務列表，所見即所得 |
+| **任務狀態** | 檢視當前配置與資料庫狀態 |
+| **系統日誌** | 檢視 run.log 與 delete_audit.log 最後 100 行 |
+| **操作面板** | 立即掃描、清除資料庫、啟動 daemon 等 |
+
+### 4. 儲存
+
+按下 **「儲存」** 按鈕 → daemon 自動收到信號重新載入配置 → 圖示切換為黃色 → 開始正常運行。
+
+---
+
+## 配置說明
+
+### ├─ 應用設定 (`[app_setting]`)
+
+| 欄位 | 型態 | 預設值 | 說明 |
+|------|------|--------|------|
+| `small_scan_interval` | 整數 | **必填** | 快速掃描間隔（分鐘），建議 15–60，不得小於 5 |
+| `complete_scan_interval` | 整數 | **必填** | 完整掃描間隔（分鐘），建議 60–240，不得小於 15 |
+| `test_mode` | 布林 | `false` | 測試模式：`true` 時只記錄不實際刪除 |
+| `log_max_size_mb` | 整數 | `10` | 日誌檔上限（MB），超過後備份為 `.log.old` |
+| `idle_threshold_min` | 整數 | `5` | 使用者閒置 N 分鐘後才執行掃描，避免干擾操作 |
+| `max_memory_mb` | 整數 | `50` | 記憶體上限（MB），超過則強制釋放 |
+| `notification_level` | 字串 | `"summary"` | 通知詳細程度：`"none"`（關閉）、`"summary"`（摘要）、`"verbose"`（詳細） |
+| `scan_on_startup` | 布林 | `true` | 啟動時立刻執行一次掃描 |
+
+### ├─ 任務 (`[[tasks]]`)
+
+每個任務定義一個要清理的目錄。可重複多個 `[[tasks]]` 區塊。
+
+| 欄位 | 型態 | 預設值 | 說明 |
+|------|------|--------|------|
+| `folder_path` | 字串 | **必填** | 目標根目錄絕對路徑 |
+| `target` | 字串陣列 | `無`（全部清理） | glob 模式，只刪除匹配的檔案／資料夾 |
+| `exclude` | 字串陣列 | `無` | glob 排除模式，永遠不刪除匹配項目 |
+| `really_delete` | 布林 | `false` | `true` = 徹底刪除（不進垃圾桶）；`false` = 移入垃圾桶 |
+| `threshold` | 物件 | **必填** | 時間閾值（詳見下方） |
+| `enabled` | 布林 | `true` | `false` 時暫時停用此任務 |
+| `scan_mode` | 字串 | `"both"` | 掃描模式：`"both"`（兩者）、`"small_only"`（僅快速）、`"complete_only"`（僅完整） |
+| `follow_symlinks` | 布林 | `false` | 是否跟隨符號連結 |
+| `schedule_window` | 物件 | `無`（不限時段） | 僅在此時間窗內掃描（可選） |
+
+### ├─ 時間閾值 (`[tasks.threshold]`)
+
+| 欄位 | 型態 | 範圍 | 說明 |
+|------|------|------|------|
+| `day` | 整數 | 0–255 | 天數 |
+| `hour` | 整數 | 0–23 | 小時 |
+| `minute` | 整數 | 0–59 | 分鐘 |
+
+**至少一個值大於 0**（總和 ≥ 3600 秒較安全，防止誤刪）。檔案最後修改時間超過此閾值即被判定為過期。
+
+### ├─ 時間窗 (`[tasks.schedule_window]`)
+
+| 欄位 | 型態 | 格式 | 說明 |
+|------|------|------|------|
+| `start` | 字串 | `"HH:MM"` (24h) | 可開始掃描的時間 |
+| `end` | 字串 | `"HH:MM"` (24h) | 結束掃描的時間 |
+
+範例：`02:00`–`06:00` 表示只在凌晨 2 點到 6 點間掃描。
+
+---
+
+## 配置範例
+
+### 範例 1：基本 — 清理下載資料夾（測試模式）
 
 ```toml
 [app_setting]
-small_scan_interval = 30        # 快速掃描間隔（分鐘）
-complete_scan_interval = 120    # 完整掃描間隔（分鐘）
-test_mode = true                # 測試模式（不實際刪除）
-log_max_size_mb = 10            # 日誌文件最大大小（MB）
+small_scan_interval = 30
+complete_scan_interval = 120
+test_mode = true
 
-[[tasks]]
-folder_path = "C:/Users/YourName/Downloads"  # 要清理的資料夾
-really_delete = false                         # false=移入垃圾桶，true=徹底刪除
-
-# 清理閾值：超過此時間的文件將被刪除
-[tasks.threshold]
-day = 7      # 天
-hour = 0     # 小時
-minute = 0   # 分鐘
-
-# 可選：指定要清理的目標（支持 glob 模式）
-# target = ["*.tmp", "temp_*", "cache/**"]
-```
-
-### 4. 刷新配置
-
-修改配置後，右鍵托盤圖標選擇「刷新配置」，程序會重新載入配置並開始工作。
-
-## 詳細配置說明
-
-### 應用設置 (app_setting)
-
-| 參數 | 類型 | 必填 | 說明 |
-|------|------|------|------|
-| `small_scan_interval` | 整數 | 是 | 快速掃描間隔（分鐘），建議 15-60 |
-| `complete_scan_interval` | 整數 | 是 | 完整掃描間隔（分鐘），建議 60-240 |
-| `test_mode` | 布爾 | 否 | 測試模式，只記錄不實際刪除，默認 false |
-| `log_max_size_mb` | 整數 | 否 | 日誌文件最大大小（MB），默認 10 |
-
-### 任務配置 (tasks)
-
-每個任務代表一個要清理的資料夾，可以配置多個任務。
-
-| 參數 | 類型 | 必填 | 說明 |
-|------|------|------|------|
-| `folder_path` | 字符串 | 是 | 要清理的資料夾絕對路徑 |
-| `really_delete` | 布爾 | 否 | true=徹底刪除，false=移入垃圾桶，默認 false |
-| `target` | 字符串數組 | 否 | 要清理的目標，支持 glob 模式，不設置則清理所有 |
-| `threshold` | 對象 | 是 | 時間閾值配置 |
-
-### 時間閾值 (threshold)
-
-| 參數 | 類型 | 必填 | 說明 |
-|------|------|------|------|
-| `day` | 整數 | 是 | 天數（0-255） |
-| `hour` | 整數 | 是 | 小時數（0-255） |
-| `minute` | 整數 | 是 | 分鐘數（0-255） |
-
-**注意**：三個值的總和不能為 0。
-
-## 使用場景示例
-
-### 場景 1：清理下載資料夾中的臨時文件
-
-```toml
 [[tasks]]
 folder_path = "C:/Users/YourName/Downloads"
 really_delete = false
-target = ["*.tmp", "*.temp", "Temp_*"]
 
 [tasks.threshold]
-day = 3
+day = 7
 hour = 0
 minute = 0
 ```
 
-### 場景 2：清理項目構建緩存
+### 範例 2：多任務 — 清理快取 + 暫存檔
 
 ```toml
+[app_setting]
+small_scan_interval = 15
+complete_scan_interval = 60
+notification_level = "summary"
+scan_on_startup = true
+
+[[tasks]]
+folder_path = "C:/Temp"
+really_delete = true
+target = ["*.tmp", "*.log", "temp_*"]
+
+[tasks.threshold]
+day = 1
+hour = 0
+minute = 0
+
 [[tasks]]
 folder_path = "D:/Projects"
-really_delete = true
-target = ["**/target/**", "**/node_modules/**", "**/.cache/**"]
+really_delete = false
+target = ["**/target/**", "**/node_modules/**"]
+exclude = ["**/important/**"]
 
 [tasks.threshold]
 day = 30
@@ -138,251 +203,252 @@ hour = 0
 minute = 0
 ```
 
-### 場景 3：清理舊日誌文件
+### 範例 3：進階 — 時間窗 + 掃描模式限制
 
 ```toml
+[app_setting]
+small_scan_interval = 30
+complete_scan_interval = 180
+idle_threshold_min = 10
+max_memory_mb = 100
+notification_level = "verbose"
+
 [[tasks]]
 folder_path = "C:/Logs"
 really_delete = true
-target = ["*.log", "*.log.*"]
+scan_mode = "complete_only"  # 完整掃描時才處理
 
 [tasks.threshold]
 day = 14
 hour = 0
 minute = 0
-```
 
-### 場景 4：清理整個資料夾（不指定 target）
+[tasks.schedule_window]
+start = "02:00"
+end = "05:00"
 
-```toml
 [[tasks]]
-folder_path = "C:/Temp"
+folder_path = "C:/Users/Public/Downloads"
 really_delete = false
-# 不設置 target，清理所有超過閾值的文件和資料夾
+scan_mode = "both"
+follow_symlinks = true
+enabled = true
 
 [tasks.threshold]
-day = 1
+day = 3
 hour = 0
 minute = 0
 ```
 
-## Glob 模式說明
+---
 
-`target` 參數支持 glob 模式匹配：
+## 掃描機制
 
-- `*`：匹配任意字符（不包括路徑分隔符）
-  - 例：`*.txt` 匹配所有 .txt 文件
-- `**`：匹配任意層級的目錄
-  - 例：`**/cache/**` 匹配所有名為 cache 的資料夾及其內容
-- `?`：匹配單個字符
-  - 例：`file?.txt` 匹配 file1.txt, fileA.txt 等
-- `[...]`：匹配字符集
-  - 例：`file[0-9].txt` 匹配 file0.txt 到 file9.txt
+### 雙模式
 
-### Glob 示例
+| | 快速掃描 (Small Scan) | 完整掃描 (Complete Scan) |
+|---|---|---|
+| 範圍 | 資料庫中已記錄的檔案 | 完整遍歷目錄樹 |
+| 速度 | 快（秒級） | 較慢（取決於檔案數） |
+| 新檔案 | 不發現 | 發現並記錄 |
+| 已刪除檔案 | 不清理 | 清理資料庫記錄 |
+| 適合 | 頻繁執行 | 定時全量檢查 |
 
-```toml
-target = [
-    "*.tmp",              # 所有 .tmp 文件
-    "temp_*",             # 所有以 temp_ 開頭的文件/資料夾
-    "cache/**",           # cache 資料夾及其所有內容
-    "**/node_modules/**", # 所有 node_modules 資料夾
-    "log_202[0-3]*.txt", # log_2020*.txt 到 log_2023*.txt
-]
-```
+### 時間判定
 
-## 工作原理
+1. **檔案**：使用檔案系統的「最後修改時間」
+2. **資料夾**：使用資料夾內最新檔案的修改時間
+3. **首次發現**：記錄當前時間為基準
+4. **更新檢測**：檔案修改時間改變 → 重置計時
 
-### 掃描模式
+### 閒置偵測
 
-#### 快速掃描（Small Scan）
-- 僅讀取數據庫記錄
-- 檢查已記錄文件是否超過閾值
-- 驗證文件實際修改時間
-- 適合頻繁執行
-
-#### 完整掃描（Complete Scan）
-- 遍歷整個資料夾
-- 更新所有文件記錄
-- 清理不存在的記錄
-- 適合定期執行
-
-### 時間判定邏輯
-
-1. **文件**：使用文件的最後修改時間
-2. **資料夾**：使用資料夾內最新文件的修改時間
-3. **首次發現**：記錄當前時間作為基準
-4. **更新檢測**：如果文件被修改，重置計時
+daemon 會偵測使用者是否點擊托盤選單。在設定 `idle_threshold_min` 分鐘內有活動時，會推遲掃描以避免干擾。
 
 ### 安全機制
 
-1. **任務根目錄保護**：永遠不會刪除任務配置的根資料夾
-2. **路徑驗證**：確保刪除的文件在任務資料夾內
-3. **Target 匹配**：有 target 時只刪除匹配的項目
-4. **測試模式**：可以先測試不實際刪除
-5. **垃圾桶機制**：默認移入垃圾桶，可恢復
+| 機制 | 說明 |
+|------|------|
+| 根目錄保護 | 永遠不會刪除 `folder_path` 本身 |
+| 路徑驗證 | 確認刪除目標在任務目錄範圍內 |
+| target 過濾 | 有設定 target 時，只刪除 glob 匹配項目 |
+| exclude 排除 | 永遠不刪除排除模式匹配的檔案 |
+| 測試模式 | `test_mode = true` 時只記錄不刪除 |
+| 垃圾桶 | `really_delete = false` 時可從垃圾桶還原 |
+| 最短閾值 | `threshold < 3600 秒` 會發出警告 |
 
-## 托盤菜單
+---
 
-右鍵點擊系統托盤圖標可以看到以下選項：
+## 托盤選單
 
-- **開啟配置**：打開配置文件進行編輯
-- **查看日誌**：查看運行日誌
-- **刷新配置**：重新載入配置文件
-- **退出**：退出程序
+右鍵系統托盤圖示：
 
-### 圖標狀態
+| 選單項目 | 說明 |
+|----------|------|
+| 開啟設定面板 (UI) | 啟動 `onee_sweeper_ui.exe` |
+| 創建開機啟動 | 在 Windows 啟動資料夾建立捷徑 |
+| 移除開機啟動 | 刪除開機啟動捷徑 |
+| 退出 | 結束 daemon 程式 |
 
-- **黃色/運行圖標**：配置正確，程序正常運行
-- **紅色/停止圖標**：配置錯誤或未配置
+---
 
-## 日誌文件
+## UI 設定面板
 
-程序會在執行文件同目錄下生成 `run.log` 文件，記錄所有操作：
+執行 `onee_sweeper_ui.exe` 後的四個分頁：
 
-- 掃描開始/結束
-- 發現的過期文件
-- 刪除操作結果
-- 錯誤和警告信息
+### 設定編輯
+- 所有應用設定與任務欄位的表單控制項
+- 支援 RAW TOML 模式（進階使用者）
+- 新增／刪除任務
+- 展開收合任務詳細設定
 
-日誌文件會自動管理大小，超過設定值會備份為 `run.log.old`。
+### 任務狀態
+- 顯示當前配置摘要
+- 資料庫檔案大小與更新時間
 
-## 數據庫文件
+### 系統日誌
+- `run.log` — 執行日誌（最後 100 行）
+- `delete_audit.log` — 刪除審計日誌（最後 100 行）
 
-程序使用 `temp.bin` 文件存儲掃描數據：
+### 操作面板
+- 立即掃描（向 daemon 發送 `scan_now` 信號）
+- 清除資料庫 (`temp.bin`)
+- 啟動 daemon
 
-- 記錄所有文件的最後修改時間
-- 使用高效的二進制格式
-- 自動備份損壞的數據庫
-- 支持跨平台路徑編碼
+---
+
+## 日誌與資料
+
+所有檔案均位於執行檔同目錄：
+
+| 檔案 | 說明 |
+|------|------|
+| `config.toml` | 設定檔（由 UI 寫入，daemon 讀取） |
+| `run.log` | 執行日誌（自動輪替，上限由 `log_max_size_mb` 控制） |
+| `run.log.old` | 舊日誌備份 |
+| `delete_audit.log` | 刪除審計日誌 |
+| `temp.bin` | 掃描資料庫（`rkyv` 二進位格式） |
+| `daemon.pid` | daemon 程序 ID（供 UI 判斷是否運行） |
+| `command.signal` | UI 發送給 daemon 的即時命令信號 |
+| `config_reload.signal` | UI 通知 daemon 重新載入設定的信號 |
+
+---
 
 ## 常見問題
 
-### Q: 程序會刪除我的重要文件嗎？
+### 程式會誤刪重要檔案嗎？
 
-A: 不會。程序有多重保護機制：
-1. 默認使用測試模式
-2. 默認移入垃圾桶而非徹底刪除
-3. 永遠不會刪除任務根目錄
-4. 只刪除超過閾值的文件
-5. 有 target 時只刪除匹配的文件
+多重保護機制確保安全：
+1. 預設移入垃圾桶，可還原
+2. 根目錄保護
+3. 排除模式
+4. 測試模式可先試跑
+5. 不足 1 小時的閾值會警告
 
-### Q: 如何測試配置是否正確？
+### 如何確認配置行為正確？
 
-A: 
-1. 設置 `test_mode = true`
-2. 刷新配置
-3. 查看日誌文件，會顯示「[測試模式] 將刪除: ...」
-4. 確認無誤後設置 `test_mode = false`
+1. 設定 `test_mode = true`
+2. 儲存後觀察日誌，會顯示「[測試模式] 將刪除: ...」
+3. 確認無誤後關閉測試模式
 
-### Q: 快速掃描和完整掃描有什麼區別？
+### 快速掃描與完整掃描有何不同？
 
-A:
-- **快速掃描**：只檢查數據庫中已記錄的文件，速度快
-- **完整掃描**：遍歷整個資料夾，發現新文件，速度較慢
-- 建議：快速掃描 15-30 分鐘，完整掃描 2-4 小時
+快速掃描只檢查已記錄的檔案（增量），完整掃描遍歷整個目錄樹（全量）。建議快速 15–30 分鐘、完整 2–4 小時。
 
-### Q: target 不設置會怎樣？
+### 不設定 target 會怎樣？
 
-A: 不設置 target 時，會清理資料夾內所有超過閾值的文件和子資料夾（除了任務根目錄本身）。
+不設 `target` 時，該任務會清理 `folder_path` 內**所有**超過閾值的檔案與子資料夾（但不會刪除根目錄本身）。
 
-### Q: 程序佔用多少資源？
+### 修改配置後需要重啟程式嗎？
 
-A: 
-- 內存：通常 < 20MB
-- CPU：掃描時短暫使用，其餘時間幾乎為 0
-- 磁盤：僅在掃描和刪除時有 I/O
+不需要。在 UI 點擊「儲存」後，daemon 會自動重新載入配置。
 
-### Q: 可以同時清理多個資料夾嗎？
+### 程式佔用多少資源？
 
-A: 可以，在配置文件中添加多個 `[[tasks]]` 區塊即可。
+- 記憶體：通常 < 20 MB（設定上限 50 MB）
+- CPU：掃描時短暫使用，其餘時間接近 0
+- 磁碟：純 I/O 操作
 
-### Q: 如何恢復被刪除的文件？
+### 程式崩潰會遺失資料嗎？
 
-A: 如果使用默認設置（`really_delete = false`），文件會在垃圾桶中，可以從垃圾桶恢復。如果設置了 `really_delete = true`，文件將被徹底刪除，無法恢復。
+不會。掃描資料庫使用原子寫入，損壞時自動從備份恢復。
 
-### Q: 配置文件修改後需要重啟程序嗎？
-
-A: 不需要，右鍵托盤圖標選擇「刷新配置」即可。
-
-### Q: 程序崩潰或異常退出會丟失數據嗎？
-
-A: 不會。程序使用原子寫入機制，即使崩潰也不會損壞數據庫。損壞的數據庫會自動備份並重建。
-
-## 注意事項
-
-⚠️ **重要提示**
-
-1. **首次使用請開啟測試模式**，確認行為符合預期
-2. **謹慎使用 `really_delete = true`**，徹底刪除無法恢復
-3. **不要設置過短的閾值**，避免誤刪最近使用的文件
-4. **定期檢查日誌**，確保程序正常運行
-5. **備份重要數據**，雖然程序很安全，但備份永遠是最佳實踐
-
-## 技術細節
-
-### 依賴項
-
-- `tray-icon`: 系統托盤圖標
-- `winit`: 事件循環
-- `image`: 圖標加載
-- `log` + `simplelog`: 日誌系統
-- `serde` + `toml`: 配置解析
-- `globset`: Glob 模式匹配
-- `rkyv`: 高效二進制序列化
-- `trash`: 垃圾桶操作
-- `edit`: 文本編輯器調用
-- `mslnk`: 連結創建
-
-### 性能優化
-
-- 使用二進制數據庫減少 I/O
-- 路徑優化避免重複刪除
-- 增量掃描減少磁盤訪問
-- 原子寫入保證數據安全
-
-### 跨平台支持
-
-- Windows: 完整支持
+---
 
 ## 開發
 
-### 項目結構
+### 專案結構
 
 ```
 onee_sweeper/
-├── src/
-│   ├── main.rs          # 主程序和 UI
-│   ├── config.rs        # 配置文件處理
-│   ├── scanner.rs       # 掃描和數據庫
-│   └── type_define.rs   # 類型定義
-├── assets/              # 資源文件
-│   ├── icon_run.ico     # 運行圖標
-│   └── icon_stop.ico    # 停止圖標
-├── Cargo.toml           # 項目配置
-└── README.md            # 本文件
+├── daemon/           # 背景服務（常駐）
+│   └── src/
+│       ├── main.rs   # 事件迴圈、托盤、掃描排程
+│       ├── scanner.rs # 掃描引擎、資料庫
+│       └── audit_log.rs # 審計日誌
+├── ui/               # 圖形設定面板
+│   └── src/
+│       └── main.rs   # egui 視窗、表單編輯
+├── core/             # 共用核心
+│   └── src/
+│       ├── config.rs     # 設定檔讀寫、版本遷移、校驗
+│       ├── type_define.rs # 資料結構定義
+│       └── lib.rs
+├── assets/           # 資源
+│   ├── icon_run.ico   # 運行圖示
+│   ├── icon_stop.ico  # 停止圖示
+│   └── jf-openhuninn-2.1.ttf  # 字型
+├── Cargo.toml        # workspace 定義
+└── README.md
 ```
 
-### 編譯選項
+### 編譯指令
 
 ```bash
-# 開發版本（帶調試信息）
+# 開發版本
 cargo build
 
-# 發布版本（優化）
+# 發布版本（全 LTO、panic=abort、strip）
 cargo build --release
 
-# 運行測試
-cargo test
+# 只編譯特定元件
+cargo build -p onee_sweeper_daemon
+cargo build -p onee_sweeper_ui
 
-# 檢查代碼
-cargo clippy
+# 執行測試
+cargo test
 ```
 
-## 許可證
+### 使用的技術
 
-請查看 LICENSE 文件。
+- **winit** — 事件迴圈
+- **tray-icon** — 系統托盤
+- **egui / eframe** — 圖形介面
+- **rkyv** — 二進位序列化（零拷貝 deserialize）
+- **serde / toml** — 設定解析
+- **notify** — 檔案系統監控
+- **notify-rust** — 桌面通知
+- **mimalloc** — 高效記憶體分配器
 
-## 聯繫方式
+---
 
-如有問題或建議，請通過 Issue 聯繫。
+## 授權與致謝
+
+### 主授權
+
+本專案（ONEE SWEEPER）原始碼採用 **GNU General Public License v3.0** 授權。完整條款請見 [LICENSE](./LICENSE) 檔案。
+
+### 字型授權
+
+本軟體分發時包含 **jf open huninn 粉圓體 v2.1**，授權於 SIL Open Font License v1.1。
+
+- Copyright © 2020–2024 **justfont Co., Ltd.**
+- Reserved Font Names: 'open huninn', 'huninn'
+- 中文字元部分衍生自 **Kosugi Maru**（Apache-2.0, © 2010 MOTOYA CO.,LTD.）
+- 拉丁／希伯來字母部分衍生自 **Varela Round**（SIL OFL v1.1, © 2011–2016 The Varela Round Project Authors）
+
+詳情請參閱 [LICENSE](./LICENSE) 中的「第三方程式元件授權聲明」一節。
+
+---
+
+*如有問題或建議，請通過 GitHub Issues 聯絡。*

@@ -44,6 +44,8 @@ const TEMP_BIN_PATH: &str = "temp.bin";
 const IPC_SIGNAL_PATH: &str = "command.signal";
 /// daemon 啟動時寫入 PID，讓 UI 判斷 daemon 是否在執行
 const DAEMON_PID_PATH: &str = "daemon.pid";
+/// UI 儲存設定後寫入此信號檔案，通知 daemon 重新載入 config.toml
+const CONFIG_RELOAD_SIGNAL_PATH: &str = "config_reload.signal";
 /// 批次刪除大小：累積到此數量即執行一次刪除
 const BATCH_SIZE: usize = 50;
 
@@ -1542,6 +1544,15 @@ impl ApplicationHandler<FileEvent> for App {
                         warn!("未知的信號命令: {}", signal_content.trim());
                     }
                 }
+            }
+        }
+
+        // 🔔 檢查 UI 發送的設定重載信號
+        if let Ok(signal_path) = get_file_path(CONFIG_RELOAD_SIGNAL_PATH) {
+            if signal_path.exists() {
+                let _ = fs::remove_file(&signal_path); // 刪除防止重複處理
+                info!("收到 UI 的設定更新信號，重新載入設定");
+                self.reload_config();
             }
         }
 

@@ -22,6 +22,7 @@ const TEMP_BIN_PATH: &str = "temp.bin";
 const LOG_PATH: &str = "run.log";
 const AUDIT_LOG_PATH: &str = "delete_audit.log";
 const SIGNAL_PATH: &str = "command.signal";
+const RELOAD_SIGNAL_PATH: &str = "config_reload.signal";
 const PID_PATH: &str = "daemon.pid";
 const WINDOW_W: f32 = 900.0;
 const WINDOW_H: f32 = 680.0;
@@ -246,6 +247,9 @@ impl AppState {
             Ok(_) => {
                 self.config_error = None;
                 self.raw_text = toml_str;
+                // 寫入信號檔案，通知 daemon 重新載入設定
+                let signal_path = self.path(RELOAD_SIGNAL_PATH);
+                let _ = fs::write(&signal_path, "");
                 self.status_message = "已儲存，daemon 將自動重新載入".into();
             }
             Err(e) => {

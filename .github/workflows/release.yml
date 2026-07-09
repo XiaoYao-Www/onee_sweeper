@@ -79,20 +79,23 @@ jobs:
         shell: bash
         run: |
           VERSION="${{ needs.check_version.outputs.version }}"
-          BIN_NAME="onee_sweeper"
+          TARGET="x86_64-pc-windows-gnu"
           DIST_DIR="dist"
-          mkdir -p "$DIST_DIR"
+          RELEASE_DIR="target/${TARGET}/release"
+          ZIP_NAME="onee_sweeper-${VERSION}-${TARGET}.zip"
 
-          # 組合檔名
-          SOURCE_FILE="target/x86_64-pc-windows-gnu/release/${BIN_NAME}.exe"
-          ZIP_NAME="${BIN_NAME}-${VERSION}-x86_64-pc-windows-gnu.zip"
-          
-          # 複製執行檔並進入資料夾壓縮
-          cp "$SOURCE_FILE" "$DIST_DIR/${BIN_NAME}.exe"
-          cd $DIST_DIR
-          
-          # 使用 Windows 內建的 7z 進行壓縮
-          7z a "$ZIP_NAME" "${BIN_NAME}.exe"
+          mkdir -p "$DIST_DIR/fonts"
+
+          # 複製兩個執行檔（需在同目錄，彼此透過 get_file_path 定位）
+          cp "${RELEASE_DIR}/onee_sweeper_daemon.exe" "$DIST_DIR/"
+          cp "${RELEASE_DIR}/onee_sweeper_ui.exe"     "$DIST_DIR/"
+
+          # 複製字體（UI 在執行期從 fonts/ 載入）
+          cp "assets/jf-openhuninn-2.1.ttf" "$DIST_DIR/fonts/"
+
+          # 壓縮整個 dist/ 目錄
+          cd "$DIST_DIR"
+          7z a "$ZIP_NAME" onee_sweeper_daemon.exe onee_sweeper_ui.exe fonts/
 
       - name: 上傳構建產物 (Upload Artifact)
         uses: actions/upload-artifact@v4
