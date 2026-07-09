@@ -78,14 +78,12 @@ fn start_watcher(proxy: EventLoopProxy<FileEvent>, config_path: Option<PathBuf>)
 
         let mut watched_paths: HashSet<PathBuf> = HashSet::new();
 
-        // 如果提供了設定檔路徑，監控其所在目錄（notify 需要監控父目錄才能捕獲檔案變更）
+        // 直接監控 config.toml 本身
         let config_path_for_watch: Option<PathBuf> = config_path.clone();
         if let Some(ref cfg_path) = config_path {
-            if let Some(parent) = cfg_path.parent() {
-                if parent.exists() {
-                    let _ = watcher.watch(parent, RecursiveMode::NonRecursive);
-                    info!("已註冊設定檔監控: {:?}", cfg_path);
-                }
+            if cfg_path.exists() {
+                let _ = watcher.watch(cfg_path.as_path(), RecursiveMode::NonRecursive);
+                info!("已註冊設定檔監控: {:?}", cfg_path);
             }
         }
 
@@ -97,9 +95,9 @@ fn start_watcher(proxy: EventLoopProxy<FileEvent>, config_path: Option<PathBuf>)
                         match event.kind {
                             EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_) => {
                                 for path in event.paths {
-                                    // 檢查是否為設定檔變更
+                                    // 只處理 config.toml 的變更
                                     if let Some(ref cfg_path) = config_path_for_watch {
-                                        if path == *cfg_path || path.ends_with("config.toml") {
+                                        if path == *cfg_path {
                                             let _ = proxy.send_event(FileEvent::ConfigChanged);
                                             info!("偵測到設定檔變更");
                                             continue;
@@ -422,6 +420,8 @@ struct App {
     last_user_activity: Instant, // 上次使用者活動時間（用於閒置偵測）
     /// 追蹤上一輪的閒置狀態（None = 第一輪，避免刷屏日誌）
     was_user_idle: Option<bool>,
+    /// 設定檔變更待處理標記（避免短時間內多次 reload）
+    config_pending: bool,
 }
 
 // ########## 應用功能 ##########
@@ -1367,7 +1367,7 @@ impl ApplicationHandler<FileEvent> for App {
                 self.pending_paths.insert(path);
             }
             FileEvent::ConfigChanged => {
-                self.reload_config();
+                self.config_pending = true;
             }
         }
     }
@@ -1375,6 +1375,12 @@ impl ApplicationHandler<FileEvent> for App {
     // 處理等待事件
     fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         let now: Instant = Instant::now();
+
+        // 處理待處理的設定檔變更（延遲到這裡執行，合併短時間內的多個事件）
+        if self.config_pending {
+            self.config_pending = false;
+            self.reload_config();
+        }
 
         // 任務調度：計算下一次需要喚醒的時間點，並設置事件循環在該時間點喚醒
         let mut next_wakeup: Instant = now + Duration::from_secs(3600); // 預設睡一小時（如果沒任務）
@@ -1717,6 +1723,7 @@ fn main() -> io::Result<()> {
         last_small_scan: initial_scan_time,
         last_user_activity: Instant::now(),
         was_user_idle: None, // 第一輪尚未判定，避免日誌刷屏
+        config_pending: false,
         config,
     };
 

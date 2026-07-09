@@ -12,6 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use onee_sweeper_core::type_define::{AppSettings, Config, FolderTask, Threshold, ScheduleWindow};
+use onee_sweeper_core::config::CURRENT_CONFIG_VERSION;
 
 // ─── 常數 ────────────────────────────────────────────────────────────────────
 
@@ -19,6 +20,7 @@ const APP_TITLE: &str = "ONEE SWEEPER 設定面板";
 const CONFIG_PATH: &str = "config.toml";
 const TEMP_BIN_PATH: &str = "temp.bin";
 const LOG_PATH: &str = "run.log";
+const AUDIT_LOG_PATH: &str = "delete_audit.log";
 const SIGNAL_PATH: &str = "command.signal";
 const PID_PATH: &str = "daemon.pid";
 const WINDOW_W: f32 = 900.0;
@@ -165,6 +167,10 @@ struct AppState {
     db_stats: String,
     /// 日誌尾部
     log_text: String,
+    /// 刪除審計日誌尾部
+    audit_log_text: String,
+    /// 切換顯示 run.log / delete_audit.log
+    show_audit_log: bool,
     working_dir: PathBuf,
     /// 是否顯示 RAW（TOML）編輯模式
     show_raw: bool,
@@ -251,7 +257,7 @@ impl AppState {
     /// 將編輯中的表單資料轉回 Config
     fn build_config(&self) -> Config {
         Config {
-            config_version: Some(3),
+            config_version: Some(CURRENT_CONFIG_VERSION),
             app_setting: self.edit_app.to_app_settings(),
             tasks: self.edit_tasks.iter().map(|t| t.to_folder_task()).collect(),
         }
@@ -330,9 +336,22 @@ impl AppState {
         }
     }
 
+    fn load_audit_log(&mut self) {
+        let audit_path = self.path(AUDIT_LOG_PATH);
+        match fs::read_to_string(&audit_path) {
+            Ok(content) => {
+                let lines: Vec<&str> = content.lines().collect();
+                let start = if lines.len() > 100 { lines.len() - 100 } else { 0 };
+                self.audit_log_text = lines[start..].join("\n");
+            }
+            Err(_) => self.audit_log_text = "審計日誌尚未產生".into(),
+        }
+    }
+
     fn refresh_all(&mut self) {
         self.load_db_stats();
         self.load_log_tail();
+        self.load_audit_log();
         self.status_message = "已重新整理".into();
     }
 }
@@ -422,9 +441,9 @@ impl AppState {
 
                 egui::Grid::new("app_grid").striped(true).num_columns(4).spacing([8.0, 4.0]).show(ui, |ui| {
                     // 快速掃描間隔
-                    ui.label("快速掃描間隔（分鐘）");
+                    ui.label("快速掃描間隔");
                     ui.add(egui::Slider::new(&mut self.edit_app.small_scan_interval, 5..=240).suffix(" 分鐘").clamping(egui::SliderClamping::Never));
-                    ui.label("完整掃描間隔（分鐘）");
+                    ui.label("完整掃描間隔");
                     ui.add(egui::Slider::new(&mut self.edit_app.complete_scan_interval, 15..=480).suffix(" 分鐘").clamping(egui::SliderClamping::Never));
                     ui.end_row();
 
@@ -434,9 +453,9 @@ impl AppState {
                     ui.checkbox(&mut self.edit_app.scan_on_startup, "啟動後立即執行一次");
                     ui.end_row();
 
-                    ui.label("閒置閾值（分鐘）");
+                    ui.label("閒置閾值");
                     ui.add(egui::Slider::new(&mut self.edit_app.idle_threshold_min, 1..=60).suffix(" 分鐘"));
-                    ui.label("記憶體上限（MB）");
+                    ui.label("記憶體上限");
                     ui.add(egui::Slider::new(&mut self.edit_app.max_memory_mb, 10..=500).suffix(" MB"));
                     ui.end_row();
 
@@ -448,7 +467,7 @@ impl AppState {
                             ui.selectable_value(&mut self.edit_app.notification_level, "summary".into(), "摘要");
                             ui.selectable_value(&mut self.edit_app.notification_level, "verbose".into(), "詳細");
                         });
-                    ui.label("日誌上限（MB）");
+                    ui.label("日誌上限");
                     ui.add(egui::Slider::new(&mut self.edit_app.log_max_size_mb, 1..=100).suffix(" MB"));
                     ui.end_row();
                 });
@@ -508,12 +527,10 @@ impl AppState {
 
                         // 閾值
                         egui::Grid::new(format!("thresh_{}", i)).num_columns(6).spacing([4.0, 2.0]).show(ui, |ui| {
-                            ui.add(egui::Slider::new(&mut task.threshold_day, 0..=365).clamping(egui::SliderClamping::Never));
-                            ui.label("天");
-                            ui.add(egui::Slider::new(&mut task.threshold_hour, 0..=23).clamping(egui::SliderClamping::Never));
-                            ui.label("小時");
-                            ui.add(egui::Slider::new(&mut task.threshold_minute, 0..=59).clamping(egui::SliderClamping::Never));
-                            ui.label("分鐘");
+                            ui.label("清除閥值");
+                            ui.add(egui::Slider::new(&mut task.threshold_day, 0..=365).clamping(egui::SliderClamping::Never).suffix(" 天"));
+                            ui.add(egui::Slider::new(&mut task.threshold_hour, 0..=23).clamping(egui::SliderClamping::Never).suffix(" 時"));
+                            ui.add(egui::Slider::new(&mut task.threshold_minute, 0..=59).clamping(egui::SliderClamping::Never).suffix(" 分"));
                             ui.end_row();
                         });
 
@@ -625,16 +642,37 @@ impl AppState {
 
 impl AppState {
     fn show_log_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("系統日誌");
-        ui.label("run.log 最後 100 行");
+        ui.heading("日誌");
+
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.show_audit_log, false, "系統日誌 (run.log)");
+            ui.selectable_value(&mut self.show_audit_log, true, "刪除審計 (delete_audit.log)");
+        });
+
         ui.add_space(8.0);
-        if ui.button("重新讀取").clicked() { self.load_log_tail(); }
+
+        if self.show_audit_log {
+            ui.label("delete_audit.log 最後 100 行");
+        } else {
+            ui.label("run.log 最後 100 行");
+        }
+
+        ui.add_space(4.0);
+        if ui.button("重新讀取").clicked() {
+            self.load_log_tail();
+            self.load_audit_log();
+        }
         ui.add_space(8.0);
 
         let font_id = FontId::monospace(11.0);
         ScrollArea::vertical().max_height(ui.available_height() - 20.0).show(ui, |ui| {
-            ui.add(egui::TextEdit::multiline(&mut self.log_text)
-                .font(font_id).interactive(false).desired_width(f32::INFINITY).desired_rows(28));
+            if self.show_audit_log {
+                ui.add(egui::TextEdit::multiline(&mut self.audit_log_text)
+                    .font(font_id).interactive(false).desired_width(f32::INFINITY).desired_rows(28));
+            } else {
+                ui.add(egui::TextEdit::multiline(&mut self.log_text)
+                    .font(font_id).interactive(false).desired_width(f32::INFINITY).desired_rows(28));
+            }
         });
     }
 }
@@ -662,12 +700,6 @@ impl AppState {
         ui.group(|ui| {
             ui.label(egui::RichText::new("設定操作").size(15.0).strong());
             ui.add_space(8.0);
-            if ui.button("用系統編輯器開啟 config.toml").clicked() {
-                if let Err(e) = open::that(&self.path(CONFIG_PATH)) {
-                    self.status_message = format!("開啟失敗: {}", e);
-                }
-            }
-            ui.add_space(8.0);
             if ui.button("清除 temp.bin 資料庫").clicked() {
                 let p = self.path(TEMP_BIN_PATH);
                 if p.exists() {
@@ -684,7 +716,7 @@ impl AppState {
             ui.add_space(8.0);
             let running = self.is_daemon_running();
             ui.label(if running { "執行中" } else { "未執行" });
-            if ui.button("啟動 daemon").clicked() {
+            if ui.button("啟動 daemon").clicked() && !running {
                 let daemon_path = self.working_dir.join("onee_sweeper_daemon.exe");
                 match std::process::Command::new(&daemon_path).spawn() {
                     Ok(_) => self.status_message = "Daemon 已啟動".into(),
@@ -737,6 +769,8 @@ fn main() -> Result<(), eframe::Error> {
             status_message: "就緒".into(),
             db_stats: String::new(),
             log_text: String::new(),
+            audit_log_text: String::new(),
+            show_audit_log: false,
             working_dir,
             show_raw: false,
             raw_text: String::new(),
@@ -745,6 +779,7 @@ fn main() -> Result<(), eframe::Error> {
         app.load_config();
         app.load_db_stats();
         app.load_log_tail();
+        app.load_audit_log();
         Ok(Box::new(app))
     }))
 }

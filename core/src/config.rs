@@ -5,7 +5,7 @@ use log::{info, warn, error};
 use crate::type_define::Config;
 
 /// 當前支援的設定檔版本
-const CURRENT_CONFIG_VERSION: u32 = 2;
+pub const CURRENT_CONFIG_VERSION: u32 = 2;
 
 /// ### 載入配置文件
 ///

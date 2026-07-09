@@ -103,6 +103,10 @@ impl AuditLog {
 
 /// 計算檔案前 8KB 的 blake3 hash（十六進位字串）
 pub fn compute_file_hash(path: &Path) -> io::Result<String> {
+    // 資料夾無法以檔案方式開啟 hash，回傳固定標記
+    if path.is_dir() {
+        return Ok("DIRECTORY".to_string());
+    }
     let file = fs::File::open(path)?;
     let mut reader = io::BufReader::with_capacity(8192, file);
     let mut hasher = blake3::Hasher::new();
