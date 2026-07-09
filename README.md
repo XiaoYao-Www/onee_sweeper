@@ -48,7 +48,7 @@
 
 ### 下載預編譯版本
 
-從 [Releases](https://github.com/ONEESWEEPER/onee_sweeper/releases) 頁面下載最新 `.zip`，解壓縮後：
+從 [Releases](https://github.com/XiaoYao-Www/onee_sweeper/releases) 頁面下載最新 `.zip`，解壓縮後：
 - `onee_sweeper_daemon.exe` — 背景服務（常駐）
 - `onee_sweeper_ui.exe` — 設定面板（按需開啟）
 - `fonts/jf-openhuninn-2.1.ttf` — 字型（UI 使用）
