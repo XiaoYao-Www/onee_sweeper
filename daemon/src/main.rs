@@ -1378,6 +1378,15 @@ impl ApplicationHandler<FileEvent> for App {
     fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         let now: Instant = Instant::now();
 
+        // 🔔 檢查 UI 發送的設定重載信號（先於 config_pending 處理，統一透過旗標去重）
+        if let Ok(signal_path) = get_file_path(CONFIG_RELOAD_SIGNAL_PATH) {
+            if signal_path.exists() {
+                let _ = fs::remove_file(&signal_path); // 刪除防止重複處理
+                info!("收到 UI 的設定更新信號");
+                self.config_pending = true; // 統一用 config_pending 旗標，由下方邏輯執行 reload
+            }
+        }
+
         // 處理待處理的設定檔變更（延遲到這裡執行，合併短時間內的多個事件）
         if self.config_pending {
             self.config_pending = false;
@@ -1544,15 +1553,6 @@ impl ApplicationHandler<FileEvent> for App {
                         warn!("未知的信號命令: {}", signal_content.trim());
                     }
                 }
-            }
-        }
-
-        // 🔔 檢查 UI 發送的設定重載信號
-        if let Ok(signal_path) = get_file_path(CONFIG_RELOAD_SIGNAL_PATH) {
-            if signal_path.exists() {
-                let _ = fs::remove_file(&signal_path); // 刪除防止重複處理
-                info!("收到 UI 的設定更新信號，重新載入設定");
-                self.reload_config();
             }
         }
 
