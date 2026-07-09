@@ -1,16 +1,16 @@
 # ============================================================
-# ONEE SWEEPER v3.0 — 雙執行檔架構
+# ONEE SWEEPER 雙執行檔架構
 #
 # 工作區包含兩個獨立執行檔：
 #   - daemon/   後台服務（常駐系統托盤，檔案監控、掃描、清理）
 #   - ui/       UI 設定工具（開啟設定 → 關閉，不佔用系統資源）
 # ============================================================
 [workspace]
-members = ["daemon", "ui"]
+members = ["daemon", "ui", "core"]
 resolver = "2"
 
 [workspace.package]
-version = "3.0.0"
+version = "2.0.0"
 edition = "2021"
 
 [profile.release]

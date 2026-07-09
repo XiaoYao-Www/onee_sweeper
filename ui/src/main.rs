@@ -5,20 +5,17 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod config;
-mod type_define;
-
 use eframe::egui;
 use egui::{CentralPanel, CollapsingHeader, Context, FontId, ScrollArea, SidePanel, TopBottomPanel};
 use rfd::FileDialog;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use type_define::{AppSettings, Config, FolderTask, Threshold, ScheduleWindow};
+use onee_sweeper_core::type_define::{AppSettings, Config, FolderTask, Threshold, ScheduleWindow};
 
 // ─── 常數 ────────────────────────────────────────────────────────────────────
 
-const APP_TITLE: &str = "🧹 ONEE SWEEPER v3.0 設定面板";
+const APP_TITLE: &str = "ONEE SWEEPER 設定面板";
 const CONFIG_PATH: &str = "config.toml";
 const TEMP_BIN_PATH: &str = "temp.bin";
 const LOG_PATH: &str = "run.log";
@@ -80,13 +77,10 @@ struct EditFolderTask {
     really_delete: bool,
     enabled: bool,
     follow_symlinks: bool,
-    min_age_before_delete: u64,
     scan_mode: String,
     threshold_day: u32,
     threshold_hour: u32,
     threshold_minute: u32,
-    min_size_bytes: String,
-    max_size_bytes: String,
     sched_start: String,
     sched_end: String,
 }
@@ -100,13 +94,10 @@ impl From<&FolderTask> for EditFolderTask {
             really_delete: t.really_delete.unwrap_or(false),
             enabled: t.is_enabled(),
             follow_symlinks: t.follow_symlinks_effective(),
-            min_age_before_delete: t.min_age_before_delete.unwrap_or(0),
             scan_mode: t.scan_mode.clone().unwrap_or_else(|| "both".into()),
             threshold_day: t.threshold.day as u32,
             threshold_hour: t.threshold.hour as u32,
             threshold_minute: t.threshold.minute as u32,
-            min_size_bytes: t.min_size_bytes.map(|v| v.to_string()).unwrap_or_default(),
-            max_size_bytes: t.max_size_bytes.map(|v| v.to_string()).unwrap_or_default(),
             sched_start: t.schedule_window.as_ref().and_then(|w| w.start.clone()).unwrap_or_default(),
             sched_end: t.schedule_window.as_ref().and_then(|w| w.end.clone()).unwrap_or_default(),
         }
@@ -129,8 +120,6 @@ impl EditFolderTask {
                 .collect();
             if v.is_empty() { None } else { Some(v) }
         };
-        let min_bytes = self.min_size_bytes.parse::<u64>().ok();
-        let max_bytes = self.max_size_bytes.parse::<u64>().ok();
 
         let sched = if self.sched_start.is_empty() && self.sched_end.is_empty() {
             None
@@ -151,10 +140,7 @@ impl EditFolderTask {
                 minute: self.threshold_minute as u8,
             },
             exclude,
-            min_size_bytes: min_bytes,
-            max_size_bytes: max_bytes,
             follow_symlinks: Some(self.follow_symlinks),
-            min_age_before_delete: if self.min_age_before_delete > 0 { Some(self.min_age_before_delete) } else { None },
             enabled: Some(self.enabled),
             scan_mode: Some(self.scan_mode.clone()),
             schedule_window: sched,
@@ -194,10 +180,10 @@ enum Tab { Settings, Status, Log, Actions }
 impl Tab {
     fn name(&self) -> &'static str {
         match self {
-            Tab::Settings => "⚙️ 設定編輯",
-            Tab::Status => "📊 任務狀態",
-            Tab::Log => "📝 系統日誌",
-            Tab::Actions => "🔧 操作面板",
+            Tab::Settings => "設定編輯",
+            Tab::Status => "任務狀態",
+            Tab::Log => "系統日誌",
+            Tab::Actions => "操作面板",
         }
     }
 }
@@ -254,7 +240,7 @@ impl AppState {
             Ok(_) => {
                 self.config_error = None;
                 self.raw_text = toml_str;
-                self.status_message = "✅ 已儲存，daemon 將自動重新載入".into();
+                self.status_message = "已儲存，daemon 將自動重新載入".into();
             }
             Err(e) => {
                 self.config_error = Some(format!("寫入失敗: {}", e));
@@ -281,13 +267,10 @@ impl AppState {
             really_delete: false,
             enabled: true,
             follow_symlinks: false,
-            min_age_before_delete: 0,
             scan_mode: "both".into(),
             threshold_day: 7,
             threshold_hour: 0,
             threshold_minute: 0,
-            min_size_bytes: String::new(),
-            max_size_bytes: String::new(),
             sched_start: String::new(),
             sched_end: String::new(),
         });
@@ -363,7 +346,7 @@ impl eframe::App for AppState {
                 let running = self.is_daemon_running();
                 ui.colored_label(
                     if running { egui::Color32::GREEN } else { egui::Color32::RED },
-                    if running { "🟢 daemon 執行中" } else { "🔴 daemon 未執行" }
+                    if running { "daemon 執行中" } else { "daemon 未執行" }
                 );
                 ui.separator();
                 ui.label(&self.status_message);
@@ -400,11 +383,11 @@ impl eframe::App for AppState {
 impl AppState {
     fn show_settings_tab(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("⚙️ 設定編輯");
+            ui.heading("設定編輯");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("💾 儲存").clicked() { self.save_config(); }
-                if ui.button("🔄 重新載入").clicked() { self.load_config(); }
-                if ui.toggle_value(&mut self.show_raw, "📄 RAW 模式").clicked() {
+                if ui.button("儲存").clicked() { self.save_config(); }
+                if ui.button("重新載入").clicked() { self.load_config(); }
+                if ui.toggle_value(&mut self.show_raw, "RAW 模式").clicked() {
                     if self.show_raw {
                         let cfg = self.build_config();
                         self.raw_text = toml::to_string_pretty(&cfg).unwrap_or_default();
@@ -434,7 +417,7 @@ impl AppState {
         ScrollArea::vertical().max_height(ui.available_height()).show(ui, |ui| {
             // ── 一般設定 ──────────────────────────────────────────────────────
             ui.group(|ui| {
-                ui.label(egui::RichText::new("📋 一般設定").size(15.0).strong());
+                ui.label(egui::RichText::new("一般設定").size(15.0).strong());
                 ui.add_space(4.0);
 
                 egui::Grid::new("app_grid").striped(true).num_columns(4).spacing([8.0, 4.0]).show(ui, |ui| {
@@ -461,9 +444,9 @@ impl AppState {
                     egui::ComboBox::from_id_salt("notif_level")
                         .selected_text(&self.edit_app.notification_level)
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.edit_app.notification_level, "none".into(), "🔇 無");
-                            ui.selectable_value(&mut self.edit_app.notification_level, "summary".into(), "🔔 摘要");
-                            ui.selectable_value(&mut self.edit_app.notification_level, "verbose".into(), "📣 詳細");
+                            ui.selectable_value(&mut self.edit_app.notification_level, "none".into(), "無");
+                            ui.selectable_value(&mut self.edit_app.notification_level, "summary".into(), "摘要");
+                            ui.selectable_value(&mut self.edit_app.notification_level, "verbose".into(), "詳細");
                         });
                     ui.label("日誌上限（MB）");
                     ui.add(egui::Slider::new(&mut self.edit_app.log_max_size_mb, 1..=100).suffix(" MB"));
@@ -476,9 +459,9 @@ impl AppState {
             // ── 任務列表 ──────────────────────────────────────────────────────
             ui.group(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("📁 任務列表").size(15.0).strong());
+                    ui.label(egui::RichText::new("任務列表").size(15.0).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("➕ 新增任務").clicked() { self.add_task(); }
+                        if ui.button("新增任務").clicked() { self.add_task(); }
                     });
                 });
             });
@@ -488,9 +471,9 @@ impl AppState {
             for (i, task) in self.edit_tasks.iter_mut().enumerate() {
                 let expanded = self.expanded_task == Some(i);
                 let header_text = format!(
-                    "📁 {} {}",
+                    "{} {}",
                     if task.folder_path.is_empty() { "(未設定路徑)" } else { &task.folder_path },
-                    if task.enabled { "" } else { " [⛔ 停用]" }
+                    if task.enabled { "" } else { " [停用]" }
                 );
                 CollapsingHeader::new(header_text)
                     .default_open(expanded)
@@ -500,8 +483,8 @@ impl AppState {
 
                         // 路徑 + 啟用
                         ui.horizontal(|ui| {
-                            ui.label("📂 資料夾路徑");
-                            if ui.button("🗂️ 選取").clicked() {
+                            ui.label("資料夾路徑");
+                            if ui.button("選取").clicked() {
                                 if let Some(dir) = FileDialog::new().set_title("選擇任務資料夾").pick_folder() {
                                     task.folder_path = dir.to_string_lossy().to_string();
                                 }
@@ -525,12 +508,12 @@ impl AppState {
 
                         // 閾值
                         egui::Grid::new(format!("thresh_{}", i)).num_columns(6).spacing([4.0, 2.0]).show(ui, |ui| {
-                            ui.label("天");
                             ui.add(egui::Slider::new(&mut task.threshold_day, 0..=365).clamping(egui::SliderClamping::Never));
-                            ui.label("小時");
+                            ui.label("天");
                             ui.add(egui::Slider::new(&mut task.threshold_hour, 0..=23).clamping(egui::SliderClamping::Never));
-                            ui.label("分鐘");
+                            ui.label("小時");
                             ui.add(egui::Slider::new(&mut task.threshold_minute, 0..=59).clamping(egui::SliderClamping::Never));
+                            ui.label("分鐘");
                             ui.end_row();
                         });
 
@@ -544,19 +527,10 @@ impl AppState {
                             egui::ComboBox::from_id_salt(format!("scanmode_{}", i))
                                 .selected_text(&task.scan_mode)
                                 .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut task.scan_mode, "both".into(), "🔄 兩者");
-                                    ui.selectable_value(&mut task.scan_mode, "small_only".into(), "⚡ 僅快速");
-                                    ui.selectable_value(&mut task.scan_mode, "complete_only".into(), "🐢 僅完整");
+                                    ui.selectable_value(&mut task.scan_mode, "both".into(), "兩者");
+                                    ui.selectable_value(&mut task.scan_mode, "small_only".into(), "僅快速");
+                                    ui.selectable_value(&mut task.scan_mode, "complete_only".into(), "僅完整");
                                 });
-                            ui.label("最小保留天數");
-                            ui.add(egui::Slider::new(&mut task.min_age_before_delete, 0..=365).suffix(" 天"));
-                            ui.end_row();
-
-                            ui.label("最小檔案大小");
-                            ui.add(egui::TextEdit::singleline(&mut task.min_size_bytes).hint_text("bytes (可留空)"));
-                            ui.label("最大檔案大小");
-                            ui.add(egui::TextEdit::singleline(&mut task.max_size_bytes).hint_text("bytes (可留空)"));
-                            ui.end_row();
                         });
 
                         ui.add_space(6.0);
@@ -577,12 +551,12 @@ impl AppState {
                         ui.add_space(6.0);
 
                         // glob 模式編輯區
-                        ui.label("🔍 目標模式（一行一個 glob，留空=所有檔案）");
+                        ui.label("目標模式（一行一個 glob，留空=所有檔案）");
                         ui.add(egui::TextEdit::multiline(&mut task.target_text)
                             .desired_rows(3).desired_width(f32::INFINITY)
                             .hint_text("# 例：\n*.tmp\n**/temp/**\nTemp_*"));
 
-                        ui.label("🚫 排除模式（一行一個 glob，永遠不刪）");
+                        ui.label("排除模式（一行一個 glob，永遠不刪）");
                         ui.add(egui::TextEdit::multiline(&mut task.exclude_text)
                             .desired_rows(3).desired_width(f32::INFINITY)
                             .hint_text("*important*\n*.keep"));
@@ -590,7 +564,7 @@ impl AppState {
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button(egui::RichText::new("🗑️ 刪除此任務").color(egui::Color32::RED)).clicked() {
+                                if ui.button(egui::RichText::new("刪除此任務").color(egui::Color32::RED)).clicked() {
                                     to_remove = Some(i);
                                 }
                             });
@@ -610,7 +584,7 @@ impl AppState {
 
 impl AppState {
     fn show_status_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("📊 任務狀態");
+        ui.heading("任務狀態");
         ui.add_space(12.0);
 
         let config_path = self.path(CONFIG_PATH);
@@ -618,12 +592,12 @@ impl AppState {
             if let Ok(cfg) = toml::from_str::<Config>(&content) {
                 egui::Grid::new("cfg_grid").striped(true).show(ui, |ui| {
                     ui.label("掃描模式");
-                    ui.label(if cfg.app_setting.test_mode.unwrap_or(false) { "🔍 測試模式" } else { "⚡ 正式模式" }); ui.end_row();
+                    ui.label(if cfg.app_setting.test_mode.unwrap_or(false) { "測試模式" } else { "正式模式" }); ui.end_row();
                     ui.label("快速掃描間隔"); ui.label(format!("{} 分鐘", cfg.app_setting.small_scan_interval)); ui.end_row();
                     ui.label("完整掃描間隔"); ui.label(format!("{} 分鐘", cfg.app_setting.complete_scan_interval)); ui.end_row();
                     ui.label("任務數量"); ui.label(format!("{} 個", cfg.tasks.len())); ui.end_row();
                     for (i, t) in cfg.tasks.iter().enumerate() {
-                        let enable = if t.is_enabled() { "✅" } else { "⛔" };
+                        let enable = if t.is_enabled() { "✔" } else { "✘" };
                         ui.label(format!("  任務{}", i+1));
                         ui.label(format!("{} {} | 閾值 {}d {}h {}m | {}",
                             enable, t.folder_path.display(),
@@ -641,7 +615,7 @@ impl AppState {
         ui.heading("資料庫");
         ui.label(&self.db_stats);
         ui.add_space(8.0);
-        if ui.button("🔄 重新整理").clicked() { self.refresh_all(); }
+        if ui.button("重新整理").clicked() { self.refresh_all(); }
     }
 }
 
@@ -651,10 +625,10 @@ impl AppState {
 
 impl AppState {
     fn show_log_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("📝 系統日誌");
+        ui.heading("系統日誌");
         ui.label("run.log 最後 100 行");
         ui.add_space(8.0);
-        if ui.button("🔄 重新讀取").clicked() { self.load_log_tail(); }
+        if ui.button("重新讀取").clicked() { self.load_log_tail(); }
         ui.add_space(8.0);
 
         let font_id = FontId::monospace(11.0);
@@ -671,14 +645,14 @@ impl AppState {
 
 impl AppState {
     fn show_actions_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("🔧 操作面板");
+        ui.heading("操作面板");
         ui.add_space(16.0);
 
         ui.group(|ui| {
-            ui.label(egui::RichText::new("🔍 掃描操作").size(15.0).strong());
+            ui.label(egui::RichText::new("掃描操作").size(15.0).strong());
             ui.add_space(8.0);
             if ui.add_sized(egui::vec2(200.0, 36.0),
-                egui::Button::new(egui::RichText::new("🔄 立即掃描").size(16.0))).clicked() {
+                egui::Button::new(egui::RichText::new("立即掃描").size(16.0))).clicked() {
                 self.trigger_scan_now();
             }
         });
@@ -686,15 +660,15 @@ impl AppState {
         ui.add_space(16.0);
 
         ui.group(|ui| {
-            ui.label(egui::RichText::new("📂 設定操作").size(15.0).strong());
+            ui.label(egui::RichText::new("設定操作").size(15.0).strong());
             ui.add_space(8.0);
-            if ui.button("✏️ 用系統編輯器開啟 config.toml").clicked() {
+            if ui.button("用系統編輯器開啟 config.toml").clicked() {
                 if let Err(e) = open::that(&self.path(CONFIG_PATH)) {
                     self.status_message = format!("開啟失敗: {}", e);
                 }
             }
             ui.add_space(8.0);
-            if ui.button("🗑️ 清除 temp.bin 資料庫").clicked() {
+            if ui.button("清除 temp.bin 資料庫").clicked() {
                 let p = self.path(TEMP_BIN_PATH);
                 if p.exists() {
                     if let Err(e) = fs::remove_file(&p) { self.status_message = format!("清除失敗: {}", e); }
@@ -706,11 +680,11 @@ impl AppState {
         ui.add_space(16.0);
 
         ui.group(|ui| {
-            ui.label(egui::RichText::new("🖥️ Daemon 控制").size(15.0).strong());
+            ui.label(egui::RichText::new("Daemon 控制").size(15.0).strong());
             ui.add_space(8.0);
             let running = self.is_daemon_running();
-            ui.label(if running { "🟢 執行中" } else { "🔴 未執行" });
-            if ui.button("🚀 啟動 daemon").clicked() {
+            ui.label(if running { "執行中" } else { "未執行" });
+            if ui.button("啟動 daemon").clicked() {
                 let daemon_path = self.working_dir.join("onee_sweeper_daemon.exe");
                 match std::process::Command::new(&daemon_path).spawn() {
                     Ok(_) => self.status_message = "Daemon 已啟動".into(),
@@ -722,10 +696,9 @@ impl AppState {
         ui.add_space(16.0);
 
         ui.group(|ui| {
-            ui.label(egui::RichText::new("ℹ️ 關於").size(15.0).strong());
+            ui.label(egui::RichText::new("關於").size(15.0).strong());
             ui.add_space(4.0);
-            ui.label("ONEE SWEEPER v3.0 — 雙執行檔架構");
-            ui.label("關閉本視窗後不佔用任何系統資源。");
+            ui.label(APP_TITLE);
         });
     }
 }
@@ -796,5 +769,5 @@ fn load_fonts_from_dir(dir: &Path, fonts: &mut egui::FontDefinitions) {
         fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(0, name.clone());
         fonts.families.entry(egui::FontFamily::Monospace).or_default().insert(0, name);
     }
-    eprintln!("✅ 已載入自訂字體");
+    eprintln!("已載入自訂字體");
 }

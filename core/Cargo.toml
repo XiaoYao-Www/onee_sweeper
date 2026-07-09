@@ -1,0 +1,11 @@
+[package]
+name = "onee_sweeper_core"
+version = "2.0.0"
+description = "ONEE SWEEPER 共享核心 — 設定結構定義、載入、校驗與版本遷移"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+toml = "1.1"
+globset = "0.4"
+log = "0.4"

@@ -48,23 +48,15 @@ pub fn bytes_to_path(b: &[u8]) -> PathBuf {
 /// 單個目標任務資料夾的掃描資料。
 #[derive(Archive, Deserialize, Serialize, Debug)]
 pub struct ScanFolderData {
-    /// 此任務資料夾的絕對路徑（bytes，跨平台）
-    pub folder_path: Vec<u8>,
     /// 所有子項目：相對路徑 bytes -> last_modified
     pub entries: HashMap<Vec<u8>, u64>,
 }
 
 impl ScanFolderData {
-    pub fn new(folder_path: &Path) -> Self {
+    pub fn new() -> Self {
         Self {
-            folder_path: path_to_bytes(folder_path),
             entries: HashMap::with_capacity(256), // 預分配 256 以避免頻繁重新分配
         }
-    }
-
-    /// ### 取得目標資料夾的 PathBuf。
-    pub fn folder_path_buf(&self) -> PathBuf {
-        bytes_to_path(&self.folder_path)
     }
 
     /// ### 插入路徑與最後修改時間。
@@ -180,7 +172,7 @@ impl ScanDatabase {
     /// ### 取得目標資料夾(自動創建)
     pub fn get_or_create_folder(&mut self, folder_path: &Path) -> &mut ScanFolderData {
         let key: Vec<u8> = path_to_bytes(folder_path);
-        self.folders.entry(key).or_insert_with(|| ScanFolderData::new(folder_path))
+        self.folders.entry(key).or_insert_with(|| ScanFolderData::new())
     }
 
     /// ### 取得目標資料夾
@@ -208,7 +200,7 @@ impl ScanDatabase {
         self.get_or_create_folder(folder_path).upsert(relative_path, last_modified);
     }
 
-    /// ### 取得資料夾的路徑
+    /// ### 取得路徑的最後修改時間
     pub fn get(&self, folder_path: &Path, relative_path: &Path) -> Option<u64> {
         self.get_folder(folder_path)?.get(relative_path)
     }
@@ -240,7 +232,7 @@ impl ScanDatabase {
         let mut empty_folders = Vec::new();
         
         for (folder_key, folder_data) in self.folders.iter_mut() {
-            let folder_path = bytes_to_path(&folder_data.folder_path);
+            let folder_path = bytes_to_path(folder_key);
             
             // 檢查資料夾本身是否存在
             if !folder_path.exists() {

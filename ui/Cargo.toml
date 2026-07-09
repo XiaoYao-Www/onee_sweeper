@@ -1,15 +1,16 @@
 [package]
 name = "onee_sweeper_ui"
-version = "3.0.0"
+version = "2.0.0"
 description = "ONEE SWEEPER UI — 圖形化設定編輯與操作面板（關閉後不殘留）"
 edition = "2021"
 
 [dependencies]
-eframe = "0.31"
-egui = "0.31"
+eframe = "0.31.0"
+egui = "0.31.0"
 serde = { version = "1.0", features = ["derive"] }
-toml = "0.9"
-rfd = "0.15"
+toml = "1.1"
+rfd = "0.17.2"
 globset = "0.4"
 log = "0.4"
 open = "5"
+onee_sweeper_core = { path = "../core" }

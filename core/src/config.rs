@@ -6,7 +6,6 @@ use crate::type_define::Config;
 
 /// 當前支援的設定檔版本
 const CURRENT_CONFIG_VERSION: u32 = 2;
-#[allow(dead_code)]
 
 /// ### 載入配置文件
 ///
@@ -130,30 +129,4 @@ fn migrate_config(mut cfg: Config) -> Result<Config, String> {
             Err(format!("不支援的配置版本: {:?}", cfg.config_version))
         }
     }
-}
-
-/// ### 讀取配置文件（簡易版，無備份/遷移）
-///
-/// 用於不需要備份機制的場合。
-#[allow(dead_code)]
-pub fn read_config_simple(path: &Path) -> Option<Config> {
-    let content: String = fs::read_to_string(path)
-        .map_err(|e: io::Error| error!("無法讀取配置文件: {}", e))
-        .ok()?;
-
-    toml::from_str::<Config>(&content)
-        .map_err(|e: toml::de::Error| error!("配置解析失敗: {}", e))
-        .ok()
-        .and_then(|cfg: Config| {
-            let errors = cfg.validate();
-            if errors.is_empty() {
-                Some(cfg)
-            } else {
-                for e in &errors {
-                    error!("配置驗證失敗: {}", e);
-                }
-                None
-            }
-        })
-        .inspect(|_| info!("配置載入成功"))
 }

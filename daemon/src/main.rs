@@ -3,9 +3,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-mod type_define;
 mod scanner;
-mod config;
 mod audit_log;
 
 use log::{ info, warn, error, debug };
@@ -37,7 +35,7 @@ use notify_rust::Notification;
 use notify::{ RecommendedWatcher, RecursiveMode, Watcher, EventKind };
 use crossbeam_channel::{ unbounded, select };
 
-use type_define::Config;
+use onee_sweeper_core::type_define::Config;
 
 const CONFIG_TOML_PATH: &str = "config.toml";
 const LOG_FILE_NAME: &str = "run.log";
@@ -287,7 +285,7 @@ fn open_or_create_toml(path: &str) -> Result<(), Box<dyn std::error::Error>> {
 /// 嘗試讀取配置文件,如果不存在返回None。
 fn read_config() -> Option<Config> {
     let path: PathBuf = get_file_path(CONFIG_TOML_PATH).ok()?;
-    config::read_config(&path)
+    onee_sweeper_core::config::read_config(&path)
 }
 
 /// ### 創建開機啟動
@@ -478,7 +476,7 @@ impl App {
                         WatchCommand::ReplaceAll(
                             cfg.tasks
                                 .iter()
-                                .map(|t: &type_define::FolderTask| t.folder_path.clone())
+                                .map(|t: &onee_sweeper_core::type_define::FolderTask| t.folder_path.clone())
                                 .collect()
                         )
                     )
